@@ -308,8 +308,21 @@ static int init_network(void)
     PR_NOTICE("Network initialized successfully");
     
     // Sync time from network
+    PR_NOTICE("Waiting for network to stabilize before time sync...");
     tal_system_sleep(2000);  // Wait for network to stabilize
-    sync_time_from_http();
+    
+    if (sync_time_from_http() == OPRT_OK && g_time_synced) {
+        // Verify time was set correctly
+        time_t current = tal_time_get_posix();
+        struct tm *tm = localtime(&current);
+        if (tm) {
+            PR_NOTICE("Time sync verified: %04d-%02d-%02d %02d:%02d:%02d",
+                     tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                     tm->tm_hour, tm->tm_min, tm->tm_sec);
+        }
+    } else {
+        PR_WARN("Time sync failed, time may be incorrect");
+    }
     
     return OPRT_OK;
 }
@@ -619,17 +632,30 @@ static void display_page(void)
     // Clear buffer
     Paint_Clear(WHITE);
     
-    // Get current time
-    TIME_T current_time = tal_time_get_posix();
-    struct tm *tm_info = localtime(&current_time);
+    // Get current time from system (like clock example)
+    time_t rawtime = tal_time_get_posix();
+    struct tm *timeinfo = NULL;
+    
+    PR_DEBUG("Current system time: %ld", rawtime);
     
     // Draw page info and time at top left
     char page_info[64];
-    if (tm_info && current_time > 0) {
-        snprintf(page_info, sizeof(page_info), "Page %d/%d  %02d:%02d", 
-                 g_reader_ctx.current_page + 1, g_reader_ctx.total_pages,
-                 tm_info->tm_hour, tm_info->tm_min);
+    if (rawtime > 0) {
+        timeinfo = localtime(&rawtime);
+        if (timeinfo) {
+            PR_DEBUG("Time: %04d-%02d-%02d %02d:%02d:%02d",
+                    timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+                    timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+            snprintf(page_info, sizeof(page_info), "Page %d/%d  %02d:%02d", 
+                     g_reader_ctx.current_page + 1, g_reader_ctx.total_pages,
+                     timeinfo->tm_hour, timeinfo->tm_min);
+        } else {
+            PR_WARN("localtime() returned NULL");
+            snprintf(page_info, sizeof(page_info), "Page %d/%d", 
+                     g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
+        }
     } else {
+        PR_WARN("Invalid system time: %ld", rawtime);
         snprintf(page_info, sizeof(page_info), "Page %d/%d", 
                  g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
     }
