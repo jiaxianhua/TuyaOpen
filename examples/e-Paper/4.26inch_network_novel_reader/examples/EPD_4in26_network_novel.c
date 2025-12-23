@@ -46,7 +46,7 @@
 // Display settings
 #define DISPLAY_WIDTH 800
 #define DISPLAY_HEIGHT 480
-#define CHARS_PER_LINE 36  // Maximum characters per line (800 / 24 = 33.3)
+#define CHARS_PER_LINE 37  // Maximum characters per line (800 / 24 = 33.3)
 #define LINES_PER_PAGE 32  // Maximum lines per page (480 / 24 = 20)
 #define BYTES_PER_PAGE 2000  // For GBK encoding (variable byte length)
 
@@ -693,10 +693,11 @@ static void display_page(void)
         snprintf(page_info, sizeof(page_info), "P%d/%d", 
                  g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
     }
-    Paint_DrawString_EN(2, 2, page_info, &Font20, BLACK, WHITE);
+    Paint_DrawString_EN(42, 2, page_info, &Font20, BLACK, WHITE);
     
     // Draw "贾" character at top right corner (GBK: 0xBCD6)
-    draw_gbk_char24(DISPLAY_WIDTH - 26, 2, 0xBC, 0xD6, BLACK, WHITE);
+    // For ROTATE_90, the actual display width is 480 (height becomes width)
+    draw_gbk_char24(10, 2, 0xBC, 0xD6, BLACK, WHITE);
     
     // Get page start position
     int page_start = g_reader_ctx.page_offsets[g_reader_ctx.current_page];
