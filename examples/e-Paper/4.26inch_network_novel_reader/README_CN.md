@@ -98,13 +98,30 @@ tos.py monitor
    - **短按**：下一页
    - **长按（3秒）**：上一页
 
-## GBK 编码说明
+## GBK 编码和中文字库
 
-本项目支持 GBK 编码的中文小说：
+本项目支持 GBK 编码的中文小说，并提供完整的 HZK16 中文字库：
 
 - **GBK 字符检测**：自动识别 GBK 双字节字符（0x81-0xFE）
 - **智能分页**：根据字符宽度（中文2单位，英文1单位）进行分页
 - **混排支持**：支持中英文混合显示
+- **完整字库**：支持所有 GB2312 汉字（6,763 个常用字）
+
+### 使用完整字库（推荐）
+
+如果你想显示从网络下载的任何中文内容，使用完整 GB2312 字库：
+
+```bash
+# 一键生成和编译（Linux/Mac）
+./build_with_full_font.sh
+
+# 或 Windows
+build_with_full_font.bat
+```
+
+这会生成包含 6,763 个汉字的完整字库（约 230KB），支持显示任何中文小说。
+
+详细说明请参考：[FULL_FONT_GUIDE.md](FULL_FONT_GUIDE.md)
 
 ### 如何准备 GBK 编码的小说文件
 
@@ -117,6 +134,26 @@ iconv -f UTF-8 -t GBK input.txt -o output.txt
 # Python
 python -c "open('output.txt','wb').write(open('input.txt','r',encoding='utf-8').read().encode('gbk'))"
 ```
+
+### 使用完整中文字库
+
+**推荐**：生成完整 GB2312 字库，支持所有常用汉字（6,763 个）：
+
+```bash
+# 下载 HZK16 字库（约 260KB）
+wget https://github.com/aguegu/BitmapFont/raw/master/font/HZK16
+
+# 一键生成和编译
+./build_with_full_font.sh  # Linux/Mac
+# 或
+build_with_full_font.bat   # Windows
+```
+
+这样就能显示从网络下载的任何中文内容了！
+
+详细说明：
+- [FULL_FONT_GUIDE.md](FULL_FONT_GUIDE.md) - 完整字库使用指南
+- [HZK16_GUIDE.md](HZK16_GUIDE.md) - HZK16 字库详细说明
 
 ## 显示参数
 

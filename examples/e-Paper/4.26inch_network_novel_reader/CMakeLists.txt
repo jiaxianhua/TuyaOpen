@@ -24,8 +24,6 @@ set(APP_SRC
     ${APP_SRC_GUI}
 )
 
-# Note: embedded_novel.c is included in APP_SRC_EXAMPLES
-
 # Exclude common build/cache directories
 list(FILTER APP_SRC EXCLUDE REGEX "/CMakeFiles/")
 list(FILTER APP_SRC EXCLUDE REGEX "\\.build/")

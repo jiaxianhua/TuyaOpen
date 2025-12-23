@@ -21,6 +21,7 @@
 #include "tdd_button_gpio.h"
 #include "board_button_config.h"
 #include "embedded_novel.h"
+#include "hzk16.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -401,6 +402,38 @@ static int fetch_novel(const char *url)
 }
 
 /**
+ * @brief Draw a GBK Chinese character using HZK16 font
+ */
+static void draw_gbk_char(int x, int y, unsigned char gb_high, unsigned char gb_low, 
+                          UWORD fg_color, UWORD bg_color)
+{
+    uint8_t font_data[32];
+    
+    // Get font data from HZK16
+    int ret = hzk16_get_font_data(gb_high, gb_low, font_data);
+    
+    if (ret != 0) {
+        // Character not found, draw placeholder
+        Paint_DrawString_EN(x, y, "[]", &Font16, fg_color, bg_color);
+        return;
+    }
+    
+    // Draw 16x16 bitmap
+    for (int row = 0; row < 16; row++) {
+        for (int col = 0; col < 16; col++) {
+            int byte_idx = row * 2 + col / 8;
+            int bit_idx = 7 - (col % 8);
+            
+            if (font_data[byte_idx] & (1 << bit_idx)) {
+                Paint_SetPixel(x + col, y + row, fg_color);
+            } else {
+                Paint_SetPixel(x + col, y + row, bg_color);
+            }
+        }
+    }
+}
+
+/**
  * @brief Display current page
  */
 static void display_page(void)
@@ -424,7 +457,7 @@ static void display_page(void)
     char page_info[64];
     snprintf(page_info, sizeof(page_info), "Page %d/%d", 
              g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
-    Paint_DrawString_EN(10, 10, page_info, &Font16, WHITE, BLACK);
+    Paint_DrawString_EN(10, 10, page_info, &Font16, BLACK, WHITE);
     
     // Get page start position
     int page_start = g_reader_ctx.page_offsets[g_reader_ctx.current_page];
@@ -494,18 +527,19 @@ static void display_page(void)
                 if (c < 0x80) {
                     // ASCII character
                     char ascii_str[2] = {line_buf[i], '\0'};
-                    Paint_DrawString_EN(x_pos, y_pos, ascii_str, &Font16, WHITE, BLACK);
+                    Paint_DrawString_EN(x_pos, y_pos, ascii_str, &Font16, BLACK, WHITE);
                     x_pos += 8;  // ASCII width
                     i++;
                 } else if (is_gbk_lead_byte(c) && i + 1 < line_len) {
-                    // GBK character - display as placeholder for now
-                    // In a full implementation, you would need GBK font support
-                    Paint_DrawString_EN(x_pos, y_pos, "[]", &Font16, WHITE, BLACK);
-                    x_pos += 16;  // GBK width (2x ASCII)
+                    // GBK character - use HZK16 font
+                    unsigned char gb_high = (unsigned char)line_buf[i];
+                    unsigned char gb_low = (unsigned char)line_buf[i + 1];
+                    draw_gbk_char(x_pos, y_pos, gb_high, gb_low, BLACK, WHITE);
+                    x_pos += 16;  // GBK width (16 pixels)
                     i += 2;
                 } else {
                     // Unknown character
-                    Paint_DrawString_EN(x_pos, y_pos, "?", &Font16, WHITE, BLACK);
+                    Paint_DrawString_EN(x_pos, y_pos, "?", &Font16, BLACK, WHITE);
                     x_pos += 8;
                     i++;
                 }
@@ -627,21 +661,21 @@ void EPD_network_novel_test(void)
     Paint_Clear(WHITE);
     
     // Show "Connecting..." message
-    Paint_DrawString_EN(200, 200, "Connecting to WiFi...", &Font24, WHITE, BLACK);
+    Paint_DrawString_EN(200, 200, "Connecting to WiFi...", &Font24, BLACK, WHITE);
     EPD_4in26_Display(g_image_buffer);
     
     // Initialize network
     if (init_network() != OPRT_OK) {
         Paint_Clear(WHITE);
-        Paint_DrawString_EN(200, 200, "WiFi Failed!", &Font24, WHITE, BLACK);
+        Paint_DrawString_EN(200, 200, "WiFi Failed!", &Font24, BLACK, WHITE);
         EPD_4in26_Display(g_image_buffer);
         goto cleanup;
     }
     
     // Show "Press button to load novel" message
     Paint_Clear(WHITE);
-    Paint_DrawString_EN(150, 200, "WiFi Connected!", &Font24, WHITE, BLACK);
-    Paint_DrawString_EN(100, 240, "Press button to load novel", &Font20, WHITE, BLACK);
+    Paint_DrawString_EN(150, 200, "WiFi Connected!", &Font24, BLACK, WHITE);
+    Paint_DrawString_EN(100, 240, "Press button to load novel", &Font20, BLACK, WHITE);
     EPD_4in26_Display(g_image_buffer);
     
     // Initialize button
@@ -658,13 +692,13 @@ void EPD_network_novel_test(void)
             
             // Show loading message
             Paint_Clear(WHITE);
-            Paint_DrawString_EN(200, 200, "Loading novel...", &Font24, WHITE, BLACK);
+            Paint_DrawString_EN(200, 200, "Loading novel...", &Font24, BLACK, WHITE);
             EPD_4in26_Display(g_image_buffer);
             
             // Load embedded novel
             if (load_embedded_novel() != OPRT_OK) {
                 Paint_Clear(WHITE);
-                Paint_DrawString_EN(200, 200, "Load Failed!", &Font24, WHITE, BLACK);
+                Paint_DrawString_EN(200, 200, "Load Failed!", &Font24, BLACK, WHITE);
                 EPD_4in26_Display(g_image_buffer);
                 goto cleanup;
             }
