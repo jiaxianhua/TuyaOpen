@@ -453,7 +453,17 @@ static void display_page(void)
     // Clear buffer
     Paint_Clear(WHITE);
     
-    // Draw page info at top
+    // Get current time
+    TIME_T current_time = tal_time_get_posix();
+    POSIX_TM_S tm_info;
+    tal_time_gmtime_r(&current_time, &tm_info);
+    
+    // Draw time at top right (HH:MM)
+    char time_str[16];
+    snprintf(time_str, sizeof(time_str), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
+    Paint_DrawString_EN(DISPLAY_WIDTH - 80, 10, time_str, &Font16, BLACK, WHITE);
+    
+    // Draw page info at top left
     char page_info[64];
     snprintf(page_info, sizeof(page_info), "Page %d/%d", 
              g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
@@ -550,9 +560,8 @@ static void display_page(void)
         line_count++;
     }
     
-    // Update display
-    EPD_4in26_Display(g_image_buffer);
-    DEV_Delay_ms(2000);
+    // Update display with fast refresh (no black flash)
+    EPD_4in26_Display_Fast(g_image_buffer);
 }
 
 /**
@@ -561,14 +570,6 @@ static void display_page(void)
 static void button_handler(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *arg)
 {
     PR_DEBUG("Button: %s, Event: %d", name, event);
-    
-    // 如果内容还没加载，按按钮加载内容
-    if (!g_reader_ctx.content_loaded) {
-        if (event == TDL_BUTTON_PRESS_DOWN) {
-            g_reader_ctx.button_event = 99;  // 特殊值：加载内容
-        }
-        return;
-    }
     
     if (event == TDL_BUTTON_PRESS_DOWN) {
         // Short press = Next page
@@ -656,76 +657,71 @@ void EPD_network_novel_test(void)
         goto cleanup;
     }
     
-    Paint_NewImage(g_image_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, 0, WHITE);
+    // Portrait mode: rotate 90 degrees (竖屏模式)
+    Paint_NewImage(g_image_buffer, DISPLAY_WIDTH, DISPLAY_HEIGHT, ROTATE_90, WHITE);
     Paint_SelectImage(g_image_buffer);
     Paint_Clear(WHITE);
     
+    // Initialize base image for fast refresh
+    EPD_4in26_Display_Base(g_image_buffer);
+    DEV_Delay_ms(500);
+    
     // Show "Connecting..." message
-    Paint_DrawString_EN(200, 200, "Connecting to WiFi...", &Font24, BLACK, WHITE);
-    EPD_4in26_Display(g_image_buffer);
+    Paint_DrawString_EN(150, 300, "Connecting to WiFi...", &Font24, BLACK, WHITE);
+    EPD_4in26_Display_Fast(g_image_buffer);
     
     // Initialize network
-    if (init_network() != OPRT_OK) {
+    int network_ok = (init_network() == OPRT_OK);
+    
+    if (network_ok) {
+        // Show "Downloading..." message
         Paint_Clear(WHITE);
-        Paint_DrawString_EN(200, 200, "WiFi Failed!", &Font24, BLACK, WHITE);
-        EPD_4in26_Display(g_image_buffer);
-        goto cleanup;
+        Paint_DrawString_EN(120, 300, "Downloading novel...", &Font24, BLACK, WHITE);
+        EPD_4in26_Display_Fast(g_image_buffer);
+        
+        // Try to fetch novel from network
+        if (fetch_novel(NOVEL_URL) != OPRT_OK) {
+            PR_WARN("Network download failed, loading embedded novel...");
+            Paint_Clear(WHITE);
+            Paint_DrawString_EN(120, 300, "Download Failed!", &Font24, BLACK, WHITE);
+            Paint_DrawString_EN(60, 350, "Loading embedded novel...", &Font20, BLACK, WHITE);
+            EPD_4in26_Display_Fast(g_image_buffer);
+            tal_system_sleep(1000);
+            
+            // Fallback to embedded novel
+            if (load_embedded_novel() != OPRT_OK) {
+                Paint_Clear(WHITE);
+                Paint_DrawString_EN(150, 300, "Load Failed!", &Font24, BLACK, WHITE);
+                EPD_4in26_Display_Fast(g_image_buffer);
+                goto cleanup;
+            }
+        }
+    } else {
+        // No network, use embedded novel
+        PR_NOTICE("No network, loading embedded novel...");
+        Paint_Clear(WHITE);
+        Paint_DrawString_EN(100, 300, "No WiFi Connection", &Font24, BLACK, WHITE);
+        Paint_DrawString_EN(60, 350, "Loading embedded novel...", &Font20, BLACK, WHITE);
+        EPD_4in26_Display_Fast(g_image_buffer);
+        tal_system_sleep(1000);
+        
+        if (load_embedded_novel() != OPRT_OK) {
+            Paint_Clear(WHITE);
+            Paint_DrawString_EN(150, 300, "Load Failed!", &Font24, BLACK, WHITE);
+            EPD_4in26_Display_Fast(g_image_buffer);
+            goto cleanup;
+        }
     }
     
-    // Show "Press button to load novel" message
-    Paint_Clear(WHITE);
-    Paint_DrawString_EN(150, 200, "WiFi Connected!", &Font24, BLACK, WHITE);
-    Paint_DrawString_EN(100, 240, "Press button to load novel", &Font20, BLACK, WHITE);
-    EPD_4in26_Display(g_image_buffer);
+    g_reader_ctx.content_loaded = 1;
     
     // Initialize button
     if (init_button() != OPRT_OK) {
         PR_WARN("Button init failed, continuing without button control");
     }
     
-    // Wait for button press to load novel
-    PR_NOTICE("Waiting for button press to load novel...");
-    
-    while (!g_reader_ctx.content_loaded) {
-        if (g_reader_ctx.button_event == 99) {
-            g_reader_ctx.button_event = 0;
-            
-            // Show loading message
-            Paint_Clear(WHITE);
-            Paint_DrawString_EN(200, 200, "Downloading novel...", &Font24, BLACK, WHITE);
-            EPD_4in26_Display(g_image_buffer);
-            
-            // Try to fetch novel from network first
-            if (fetch_novel(NOVEL_URL) != OPRT_OK) {
-                PR_WARN("Network download failed, loading embedded novel...");
-                Paint_Clear(WHITE);
-                Paint_DrawString_EN(150, 200, "Download Failed!", &Font24, BLACK, WHITE);
-                Paint_DrawString_EN(100, 240, "Loading embedded novel...", &Font20, BLACK, WHITE);
-                EPD_4in26_Display(g_image_buffer);
-                tal_system_sleep(2000);
-                
-                // Fallback to embedded novel
-                if (load_embedded_novel() != OPRT_OK) {
-                    Paint_Clear(WHITE);
-                    Paint_DrawString_EN(200, 200, "Load Failed!", &Font24, BLACK, WHITE);
-                    EPD_4in26_Display(g_image_buffer);
-                    goto cleanup;
-                }
-            }
-            
-            g_reader_ctx.content_loaded = 1;
-            
-            // Display first page
-            display_page();
-            break;
-        }
-        tal_system_sleep(100);
-    }
-    
-    if (!g_reader_ctx.content_loaded) {
-        PR_ERR("Novel not loaded");
-        goto cleanup;
-    }
+    // Display first page
+    display_page();
     
     // Main loop - handle button events
     PR_NOTICE("Entering main loop. Use button to navigate:");
