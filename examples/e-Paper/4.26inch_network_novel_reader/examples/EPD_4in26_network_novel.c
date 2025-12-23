@@ -22,6 +22,7 @@
 #include "board_button_config.h"
 #include "embedded_novel.h"
 #include "hzk16.h"
+#include "hzk24.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -45,8 +46,8 @@
 // Display settings
 #define DISPLAY_WIDTH 800
 #define DISPLAY_HEIGHT 480
-#define CHARS_PER_LINE 40  // Reduced for Chinese characters
-#define LINES_PER_PAGE 22  // Adjusted for better display
+#define CHARS_PER_LINE 28  // For 24x24 font (800 / 24 ≈ 33, leave margin)
+#define LINES_PER_PAGE 18  // For 24x24 font (480 / 24 = 20, leave space for header)
 #define BYTES_PER_PAGE 2000  // For GBK encoding (variable byte length)
 
 // Button settings
@@ -581,7 +582,7 @@ static int fetch_novel(const char *url)
 }
 
 /**
- * @brief Draw a GBK Chinese character using HZK16 font
+ * @brief Draw a GBK Chinese character using HZK16 font (16x16)
  */
 static void draw_gbk_char(int x, int y, unsigned char gb_high, unsigned char gb_low, 
                           UWORD fg_color, UWORD bg_color)
@@ -601,6 +602,38 @@ static void draw_gbk_char(int x, int y, unsigned char gb_high, unsigned char gb_
     for (int row = 0; row < 16; row++) {
         for (int col = 0; col < 16; col++) {
             int byte_idx = row * 2 + col / 8;
+            int bit_idx = 7 - (col % 8);
+            
+            if (font_data[byte_idx] & (1 << bit_idx)) {
+                Paint_SetPixel(x + col, y + row, fg_color);
+            } else {
+                Paint_SetPixel(x + col, y + row, bg_color);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Draw a GBK Chinese character using HZK24 font (24x24)
+ */
+static void draw_gbk_char24(int x, int y, unsigned char gb_high, unsigned char gb_low, 
+                            UWORD fg_color, UWORD bg_color)
+{
+    uint8_t font_data[72];
+    
+    // Get font data from HZK24
+    int ret = hzk24_get_font_data(gb_high, gb_low, font_data);
+    
+    if (ret != 0) {
+        // Character not found, draw placeholder
+        Paint_DrawString_EN(x, y, "[]", &Font24, fg_color, bg_color);
+        return;
+    }
+    
+    // Draw 24x24 bitmap
+    for (int row = 0; row < 24; row++) {
+        for (int col = 0; col < 24; col++) {
+            int byte_idx = row * 3 + col / 8;  // 24 pixels = 3 bytes per row
             int bit_idx = 7 - (col % 8);
             
             if (font_data[byte_idx] & (1 << bit_idx)) {
@@ -639,15 +672,16 @@ static void display_page(void)
     PR_DEBUG("Current system time: %ld", rawtime);
     
     // Draw page info and time at top left
-    char page_info[64];
+    char page_info[80];
     if (rawtime > 0) {
         timeinfo = localtime(&rawtime);
         if (timeinfo) {
             PR_DEBUG("Time: %04d-%02d-%02d %02d:%02d:%02d",
                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
                     timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-            snprintf(page_info, sizeof(page_info), "Page %d/%d  %02d:%02d", 
+            snprintf(page_info, sizeof(page_info), "Page %d/%d  %04d-%02d-%02d %02d:%02d", 
                      g_reader_ctx.current_page + 1, g_reader_ctx.total_pages,
+                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
                      timeinfo->tm_hour, timeinfo->tm_min);
         } else {
             PR_WARN("localtime() returned NULL");
@@ -668,7 +702,7 @@ static void display_page(void)
                    : g_reader_ctx.content_size;
     
     // Draw content line by line
-    int y_pos = 40;
+    int y_pos = 45;  // Start position for 24x24 font
     int pos = page_start;
     int line_count = 0;
     
@@ -729,26 +763,26 @@ static void display_page(void)
                 if (c < 0x80) {
                     // ASCII character
                     char ascii_str[2] = {line_buf[i], '\0'};
-                    Paint_DrawString_EN(x_pos, y_pos, ascii_str, &Font16, BLACK, WHITE);
-                    x_pos += 8;  // ASCII width
+                    Paint_DrawString_EN(x_pos, y_pos, ascii_str, &Font24, BLACK, WHITE);
+                    x_pos += 12;  // ASCII width for Font24
                     i++;
                 } else if (is_gbk_lead_byte(c) && i + 1 < line_len) {
-                    // GBK character - use HZK16 font
+                    // GBK character - use HZK24 font
                     unsigned char gb_high = (unsigned char)line_buf[i];
                     unsigned char gb_low = (unsigned char)line_buf[i + 1];
-                    draw_gbk_char(x_pos, y_pos, gb_high, gb_low, BLACK, WHITE);
-                    x_pos += 16;  // GBK width (16 pixels)
+                    draw_gbk_char24(x_pos, y_pos, gb_high, gb_low, BLACK, WHITE);
+                    x_pos += 24;  // GBK width (24 pixels)
                     i += 2;
                 } else {
                     // Unknown character
-                    Paint_DrawString_EN(x_pos, y_pos, "?", &Font16, BLACK, WHITE);
-                    x_pos += 8;
+                    Paint_DrawString_EN(x_pos, y_pos, "?", &Font24, BLACK, WHITE);
+                    x_pos += 12;
                     i++;
                 }
             }
         }
         
-        y_pos += 20;
+        y_pos += 26;  // Line spacing for 24x24 font (24 + 2 pixel gap)
         line_count++;
     }
     
