@@ -58,11 +58,11 @@
  * GPIOI config
 **/
 #ifndef EPD_SCLK_PIN
-#define EPD_SCLK_PIN    TUYA_GPIO_NUM_2
+#define EPD_SCLK_PIN    TUYA_GPIO_NUM_14
 #endif
 
 #ifndef EPD_MOSI_PIN
-#define EPD_MOSI_PIN    TUYA_GPIO_NUM_4
+#define EPD_MOSI_PIN    TUYA_GPIO_NUM_16
 #endif
 
 #ifndef EPD_CS_PIN      
@@ -88,7 +88,7 @@
 /**
  * SPI config
 **/
-#define SPI_ID          TUYA_SPI_NUM_1
+#define SPI_ID          TUYA_SPI_NUM_0
 #define SPI_FREQ        4 * 1000 * 1000  // 4M
 
 /*------------------------------------------------------------------------------------------------------*/
