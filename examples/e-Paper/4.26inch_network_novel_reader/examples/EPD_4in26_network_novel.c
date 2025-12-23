@@ -692,16 +692,28 @@ void EPD_network_novel_test(void)
             
             // Show loading message
             Paint_Clear(WHITE);
-            Paint_DrawString_EN(200, 200, "Loading novel...", &Font24, BLACK, WHITE);
+            Paint_DrawString_EN(200, 200, "Downloading novel...", &Font24, BLACK, WHITE);
             EPD_4in26_Display(g_image_buffer);
             
-            // Load embedded novel
-            if (load_embedded_novel() != OPRT_OK) {
+            // Try to fetch novel from network first
+            if (fetch_novel(NOVEL_URL) != OPRT_OK) {
+                PR_WARN("Network download failed, loading embedded novel...");
                 Paint_Clear(WHITE);
-                Paint_DrawString_EN(200, 200, "Load Failed!", &Font24, BLACK, WHITE);
+                Paint_DrawString_EN(150, 200, "Download Failed!", &Font24, BLACK, WHITE);
+                Paint_DrawString_EN(100, 240, "Loading embedded novel...", &Font20, BLACK, WHITE);
                 EPD_4in26_Display(g_image_buffer);
-                goto cleanup;
+                tal_system_sleep(2000);
+                
+                // Fallback to embedded novel
+                if (load_embedded_novel() != OPRT_OK) {
+                    Paint_Clear(WHITE);
+                    Paint_DrawString_EN(200, 200, "Load Failed!", &Font24, BLACK, WHITE);
+                    EPD_4in26_Display(g_image_buffer);
+                    goto cleanup;
+                }
             }
+            
+            g_reader_ctx.content_loaded = 1;
             
             // Display first page
             display_page();
