@@ -24,6 +24,8 @@
 #include "hzk16.h"
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
+#include <ctype.h>
 
 /***********************************************************
 ************************macro define************************
@@ -34,6 +36,11 @@
 
 // Novel URL - CHANGE THIS TO YOUR NOVEL URL
 #define NOVEL_URL "http://120.79.89.230/fanren.txt"
+
+// Time sync settings
+#define TIME_SERVER_URL "www.baidu.com"
+#define TIME_SERVER_PATH "/"
+#define HTTP_REQUEST_TIMEOUT 8000
 
 // Display settings
 #define DISPLAY_WIDTH 800
@@ -65,10 +72,164 @@ typedef struct {
 ***********************************************************/
 static novel_reader_ctx_t g_reader_ctx = {0};
 static UBYTE *g_image_buffer = NULL;
+static int g_time_synced = 0;
 
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+
+/**
+ * @brief Parse HTTP Date header and set system time
+ * Example: "Date: Thu, 20 Dec 2024 12:34:56 GMT"
+ */
+static int parse_http_date(const char *date_str, struct tm *tm_time)
+{
+    // Skip "Date: " prefix if present
+    const char *p = strstr(date_str, "Date:");
+    if (p) {
+        p += 5;
+        while (*p == ' ') p++;
+    } else {
+        p = date_str;
+    }
+    
+    // Parse: "Thu, 20 Dec 2024 12:34:56 GMT"
+    char month_str[4] = {0};
+    char weekday[4] = {0};
+    
+    int parsed = sscanf(p, "%3s, %d %3s %d %d:%d:%d",
+                       weekday,
+                       &tm_time->tm_mday,
+                       month_str,
+                       &tm_time->tm_year,
+                       &tm_time->tm_hour,
+                       &tm_time->tm_min,
+                       &tm_time->tm_sec);
+    
+    if (parsed != 7) {
+        PR_ERR("Failed to parse date string: %s", date_str);
+        return -1;
+    }
+    
+    // Convert month string to number
+    const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    tm_time->tm_mon = -1;
+    for (int i = 0; i < 12; i++) {
+        if (strcmp(month_str, months[i]) == 0) {
+            tm_time->tm_mon = i;
+            break;
+        }
+    }
+    
+    if (tm_time->tm_mon == -1) {
+        PR_ERR("Invalid month: %s", month_str);
+        return -1;
+    }
+    
+    // Adjust year (tm_year is years since 1900)
+    tm_time->tm_year -= 1900;
+    tm_time->tm_isdst = 0;
+    
+    return 0;
+}
+
+/**
+ * @brief Sync time from HTTP server and set system time
+ */
+static int sync_time_from_http(void)
+{
+    int rt = OPRT_OK;
+    http_client_response_t http_response = {0};
+    
+    PR_NOTICE("Syncing time from %s...", TIME_SERVER_URL);
+    
+    http_client_header_t headers[] = {
+        {.key = "User-Agent", .value = "Mozilla/5.0"},
+        {.key = "Connection", .value = "close"}
+    };
+    
+    http_client_status_t http_status = http_client_request(
+        &(const http_client_request_t){
+            .cacert = NULL,
+            .cacert_len = 0,
+            .host = TIME_SERVER_URL,
+            .port = 80,
+            .method = "GET",
+            .path = TIME_SERVER_PATH,
+            .headers = headers,
+            .headers_count = 2,
+            .body = "",
+            .body_length = 0,
+            .timeout_ms = HTTP_REQUEST_TIMEOUT
+        },
+        &http_response);
+    
+    if (HTTP_CLIENT_SUCCESS != http_status) {
+        PR_ERR("HTTP request failed: %d", http_status);
+        rt = OPRT_COM_ERROR;
+        goto cleanup;
+    }
+    
+    PR_NOTICE("HTTP request successful, status: %d", http_response.status_code);
+    
+    // Parse Date header from response
+    if (http_response.headers && http_response.headers_length > 0) {
+        char *headers_str = (char *)tal_malloc(http_response.headers_length + 1);
+        if (headers_str) {
+            memcpy(headers_str, http_response.headers, http_response.headers_length);
+            headers_str[http_response.headers_length] = '\0';
+            
+            // Find Date header (case insensitive)
+            char *date_line = strstr(headers_str, "Date:");
+            if (!date_line) {
+                date_line = strstr(headers_str, "date:");
+            }
+            
+            if (date_line) {
+                char *line_end = strstr(date_line, "\r\n");
+                if (line_end) {
+                    *line_end = '\0';
+                }
+                
+                PR_NOTICE("Found Date header: %s", date_line);
+                
+                struct tm tm_time = {0};
+                if (parse_http_date(date_line, &tm_time) == 0) {
+                    // Convert to timestamp (GMT)
+                    time_t server_time_gmt = mktime(&tm_time);
+                    // Add 8 hours for China timezone (GMT+8)
+                    time_t server_time_local = server_time_gmt + (8 * 3600);
+                    
+                    // Set system time using tal_time_set_posix
+                    tal_time_set_posix(server_time_local, 0);
+                    g_time_synced = 1;
+                    
+                    PR_NOTICE("System time set to: %ld", server_time_local);
+                    
+                    struct tm *synced_time = localtime(&server_time_local);
+                    PR_NOTICE("Synced time (GMT+8): %04d-%02d-%02d %02d:%02d:%02d",
+                             synced_time->tm_year + 1900,
+                             synced_time->tm_mon + 1,
+                             synced_time->tm_mday,
+                             synced_time->tm_hour,
+                             synced_time->tm_min,
+                             synced_time->tm_sec);
+                } else {
+                    PR_ERR("Failed to parse date header");
+                }
+            } else {
+                PR_WARN("No Date header found in response");
+            }
+            
+            tal_free(headers_str);
+        }
+    }
+    
+cleanup:
+    http_client_free(&http_response);
+    return rt;
+}
 
 /**
  * @brief Network status callback
@@ -145,6 +306,11 @@ static int init_network(void)
     }
     
     PR_NOTICE("Network initialized successfully");
+    
+    // Sync time from network
+    tal_system_sleep(2000);  // Wait for network to stabilize
+    sync_time_from_http();
+    
     return OPRT_OK;
 }
 
@@ -455,18 +621,18 @@ static void display_page(void)
     
     // Get current time
     TIME_T current_time = tal_time_get_posix();
-    POSIX_TM_S tm_info;
-    tal_time_gmtime_r(&current_time, &tm_info);
+    struct tm *tm_info = localtime(&current_time);
     
-    // Draw time at top right (HH:MM)
-    char time_str[16];
-    snprintf(time_str, sizeof(time_str), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
-    Paint_DrawString_EN(DISPLAY_WIDTH - 80, 10, time_str, &Font16, BLACK, WHITE);
-    
-    // Draw page info at top left
+    // Draw page info and time at top left
     char page_info[64];
-    snprintf(page_info, sizeof(page_info), "Page %d/%d", 
-             g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
+    if (tm_info && current_time > 0) {
+        snprintf(page_info, sizeof(page_info), "Page %d/%d  %02d:%02d", 
+                 g_reader_ctx.current_page + 1, g_reader_ctx.total_pages,
+                 tm_info->tm_hour, tm_info->tm_min);
+    } else {
+        snprintf(page_info, sizeof(page_info), "Page %d/%d", 
+                 g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
+    }
     Paint_DrawString_EN(10, 10, page_info, &Font16, BLACK, WHITE);
     
     // Get page start position
