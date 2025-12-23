@@ -46,8 +46,8 @@
 // Display settings
 #define DISPLAY_WIDTH 800
 #define DISPLAY_HEIGHT 480
-#define CHARS_PER_LINE 28  // For 24x24 font (800 / 24 ≈ 33, leave margin)
-#define LINES_PER_PAGE 18  // For 24x24 font (480 / 24 = 20, leave space for header)
+#define CHARS_PER_LINE 36  // Maximum characters per line (800 / 24 = 33.3)
+#define LINES_PER_PAGE 32  // Maximum lines per page (480 / 24 = 20)
 #define BYTES_PER_PAGE 2000  // For GBK encoding (variable byte length)
 
 // Button settings
@@ -594,7 +594,7 @@ static void draw_gbk_char(int x, int y, unsigned char gb_high, unsigned char gb_
     
     if (ret != 0) {
         // Character not found, draw placeholder
-        Paint_DrawString_EN(x, y, "[]", &Font16, fg_color, bg_color);
+        Paint_DrawString_EN(x, y, "  ", &Font16, fg_color, bg_color);
         return;
     }
     
@@ -626,7 +626,7 @@ static void draw_gbk_char24(int x, int y, unsigned char gb_high, unsigned char g
     
     if (ret != 0) {
         // Character not found, draw placeholder
-        Paint_DrawString_EN(x, y, "[]", &Font24, fg_color, bg_color);
+        Paint_DrawString_EN(x, y, "  ", &Font24, fg_color, bg_color);
         return;
     }
     
@@ -671,7 +671,7 @@ static void display_page(void)
     
     PR_DEBUG("Current system time: %ld", rawtime);
     
-    // Draw page info and time at top left
+    // Draw page info and time at top left (compact format)
     char page_info[80];
     if (rawtime > 0) {
         timeinfo = localtime(&rawtime);
@@ -679,21 +679,24 @@ static void display_page(void)
             PR_DEBUG("Time: %04d-%02d-%02d %02d:%02d:%02d",
                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
                     timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
-            snprintf(page_info, sizeof(page_info), "Page %d/%d  %04d-%02d-%02d %02d:%02d", 
+            snprintf(page_info, sizeof(page_info), "T5AI P%d/%d %04d-%02d-%02d %02d:%02d", 
                      g_reader_ctx.current_page + 1, g_reader_ctx.total_pages,
                      timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
                      timeinfo->tm_hour, timeinfo->tm_min);
         } else {
             PR_WARN("localtime() returned NULL");
-            snprintf(page_info, sizeof(page_info), "Page %d/%d", 
+            snprintf(page_info, sizeof(page_info), "P%d/%d", 
                      g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
         }
     } else {
         PR_WARN("Invalid system time: %ld", rawtime);
-        snprintf(page_info, sizeof(page_info), "Page %d/%d", 
+        snprintf(page_info, sizeof(page_info), "P%d/%d", 
                  g_reader_ctx.current_page + 1, g_reader_ctx.total_pages);
     }
-    Paint_DrawString_EN(10, 10, page_info, &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(2, 2, page_info, &Font20, BLACK, WHITE);
+    
+    // Draw "贾" character at top right corner (GBK: 0xBCD6)
+    draw_gbk_char24(DISPLAY_WIDTH - 26, 2, 0xBC, 0xD6, BLACK, WHITE);
     
     // Get page start position
     int page_start = g_reader_ctx.page_offsets[g_reader_ctx.current_page];
@@ -702,7 +705,7 @@ static void display_page(void)
                    : g_reader_ctx.content_size;
     
     // Draw content line by line
-    int y_pos = 45;  // Start position for 24x24 font
+    int y_pos = 24;  // Start right after compact header
     int pos = page_start;
     int line_count = 0;
     
@@ -774,20 +777,20 @@ static void display_page(void)
                     x_pos += 24;  // GBK width (24 pixels)
                     i += 2;
                 } else {
-                    // Unknown character
-                    Paint_DrawString_EN(x_pos, y_pos, "?", &Font24, BLACK, WHITE);
+                    // Unknown character - use space as placeholder
+                    Paint_DrawString_EN(x_pos, y_pos, " ", &Font24, BLACK, WHITE);
                     x_pos += 12;
                     i++;
                 }
             }
         }
         
-        y_pos += 26;  // Line spacing for 24x24 font (24 + 2 pixel gap)
+        y_pos += 24;  // Tight line spacing for 24x24 font (no gap)
         line_count++;
     }
     
-    // Update display with fast refresh (no black flash)
-    EPD_4in26_Display_Fast(g_image_buffer);
+    // Update display with full refresh
+    EPD_4in26_Display(g_image_buffer);
 }
 
 /**
@@ -888,13 +891,9 @@ void EPD_network_novel_test(void)
     Paint_SelectImage(g_image_buffer);
     Paint_Clear(WHITE);
     
-    // Initialize base image for fast refresh
-    EPD_4in26_Display_Base(g_image_buffer);
-    DEV_Delay_ms(500);
-    
     // Show "Connecting..." message
     Paint_DrawString_EN(150, 300, "Connecting to WiFi...", &Font24, BLACK, WHITE);
-    EPD_4in26_Display_Fast(g_image_buffer);
+    EPD_4in26_Display(g_image_buffer);
     
     // Initialize network
     int network_ok = (init_network() == OPRT_OK);
