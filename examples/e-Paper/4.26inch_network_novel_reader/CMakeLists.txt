@@ -11,6 +11,7 @@ get_filename_component(APP_NAME ${APP_PATH} NAME)
 
 # APP SRC - Set the source files by directory
 file(GLOB APP_SRC_EXAMPLES    "${APP_PATH}/examples/*.c")
+file(GLOB APP_SRC_SRC         "${APP_PATH}/src/*.c")
 file(GLOB APP_SRC_CONFIG      "${APP_PATH}/lib/Config/*.c")
 file(GLOB APP_SRC_EPAPER      "${APP_PATH}/lib/e-Paper/*.c")
 file(GLOB APP_SRC_FONTS       "${APP_PATH}/lib/Fonts/*.c")
@@ -18,6 +19,7 @@ file(GLOB APP_SRC_GUI         "${APP_PATH}/lib/GUI/*.c")
 
 set(APP_SRC
     ${APP_SRC_EXAMPLES}
+    ${APP_SRC_SRC}
     ${APP_SRC_CONFIG}
     ${APP_SRC_EPAPER}
     ${APP_SRC_FONTS}
@@ -32,6 +34,7 @@ list(FILTER APP_SRC EXCLUDE REGEX "\\.git/")
 # APP INC - Set the header file directory
 set(APP_INC 
     ${APP_PATH}/examples
+    ${APP_PATH}/include
     ${APP_PATH}
     ${APP_PATH}/lib/Config
     ${APP_PATH}/lib/e-Paper

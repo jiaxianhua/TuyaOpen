@@ -1,33 +1,48 @@
 # 4.26inch E-Paper Network Novel Reader
 
-A network-enabled e-paper novel reader that fetches text content from HTTP URLs and displays it with button-controlled pagination.
+A network-enabled e-paper novel reader with SD card support that can fetch text content from HTTP URLs or read files directly from SD card, displaying them with button-controlled pagination.
 
 ## Features
 
+### Core Features
 - **Network Fetching**: Downloads novels from HTTP URLs via WiFi
+- **SD Card Support**: Browse and read TXT files and view BMP images from SD card
 - **E-Paper Display**: Shows text content on 4.26" e-paper display (800x480)
+- **File Browser**: Visual interface for browsing SD card files
 - **Button Navigation**: 
-  - **Short press**: Next page
-  - **Long press**: Previous page
+  - **File Browser**: Short press = Next file, Long press = Open file
+  - **Text Reader**: Short press = Next page, Long press = Close file
+  - **Image Viewer**: Long press = Close image
 - **Automatic Pagination**: Splits content into readable pages
+- **Chinese Support**: Full GBK Chinese character display with HZK24 fonts
 - **Low Power**: E-paper display only updates when changing pages
 
-## Hardware Requirements
+### SD Card Features (NEW!)
+- ✅ **File Browser**: Browse TXT and BMP files on SD card
+- ✅ **Text Reading**: Read TXT files with automatic pagination
+- ✅ **Image Viewing**: Display BMP images (monochrome)
+- ✅ **Auto Sample Files**: Creates sample files on first run
+- ✅ **Image Converter**: Python tool to convert photos to BMP
+- ⏳ **PNG/JPG Support**: Coming soon
 
-- Tuya T5AI board with 4.26" e-paper display
-- WiFi connectivity
-- At least one button (configured via BUTTON_NAME in board config)
+## Quick Start
 
-## Configuration
+### 1. SD Card Setup (Optional)
+If you have an SD card module:
+1. Connect SD card module to your board
+2. Format SD card as FAT32
+3. Copy TXT files and BMP images to root directory
+4. See [SD_CARD_QUICKSTART.md](SD_CARD_QUICKSTART.md) for details
 
-Before building, update these settings in `examples/EPD_4in26_network_novel.c`:
+### 2. WiFi Configuration
+Update these settings in `examples/EPD_4in26_network_novel.c`:
 
 ```c
 // WiFi Configuration
 #define WIFI_SSID "your-wifi-ssid"
 #define WIFI_PASSWORD "your-wifi-password"
 
-// Novel URL
+// Novel URL (if not using SD card)
 #define NOVEL_URL "http://example.com/novel.txt"
 ```
 
@@ -42,6 +57,42 @@ The project uses **GPIO 17** as the default button pin. If your board uses a dif
    ```
 
 See [BUTTON_SETUP.md](BUTTON_SETUP.md) for detailed button configuration guide.
+
+## Hardware Requirements
+
+- Tuya T5AI board with 4.26" e-paper display
+- WiFi connectivity (for network novel fetching)
+- At least one button (configured via BUTTON_NAME in board config)
+- SD card module (optional, for local file browsing)
+
+## Usage Modes
+
+### Mode 1: SD Card File Browser (Recommended)
+1. Insert SD card with TXT/BMP files
+2. Power on device
+3. Browse files with short button press
+4. Open files with long button press (3s)
+5. Read/view content, long press to return
+
+### Mode 2: Network Novel Reader
+1. Configure WiFi credentials
+2. Set novel URL
+3. Device downloads and displays novel
+4. Use buttons to navigate pages
+
+### Mode 3: Embedded Novel (Fallback)
+- If no SD card or network, displays built-in sample novel
+- Useful for testing and demonstration
+
+## Button Controls Summary
+
+| Mode | Short Press | Long Press (3s) |
+|------|-------------|-----------------|
+| **File Browser** | Next file | Open file |
+| **Text Reader** | Next page | Close file / Previous page |
+| **Image Viewer** | - | Close image |
+
+## Configuration
 
 ### Display Settings
 

@@ -23,6 +23,8 @@
 #include "embedded_novel.h"
 #include "hzk16.h"
 #include "hzk24.h"
+#include "sd_file_manager.h"
+#include "GUI_BMPfile.h"
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -56,6 +58,12 @@
 /***********************************************************
 ***********************typedef define***********************
 ***********************************************************/
+typedef enum {
+    MODE_FILE_BROWSER = 0,  // 文件浏览模式
+    MODE_TEXT_READER,       // 文本阅读模式
+    MODE_IMAGE_VIEWER       // 图片查看模式
+} app_mode_e;
+
 typedef struct {
     char *content;
     int content_size;
@@ -66,6 +74,11 @@ typedef struct {
     int content_loaded;         // 内容是否已加载
     int *page_offsets;          // Array of page start offsets
     int page_offsets_count;     // Number of pages
+    
+    // SD card file browser
+    file_browser_t browser;
+    app_mode_e mode;
+    int sd_available;
 } novel_reader_ctx_t;
 
 /***********************************************************
@@ -795,6 +808,161 @@ static void display_page(void)
 }
 
 /**
+ * @brief Display file browser
+ */
+static void display_file_browser(void)
+{
+    PR_NOTICE("Displaying file browser");
+    
+    Paint_Clear(WHITE);
+    
+    // Draw title
+    Paint_DrawString_EN(10, 2, "SD Card Files", &Font24, BLACK, WHITE);
+    
+    // Draw file list (show 10 files per screen)
+    int start_idx = (g_reader_ctx.browser.current_index / 10) * 10;
+    int y_pos = 40;
+    
+    for (int i = start_idx; i < g_reader_ctx.browser.file_count && i < start_idx + 10; i++) {
+        char line[150];
+        const char *type_str = "";
+        
+        switch (g_reader_ctx.browser.files[i].type) {
+            case FILE_TYPE_TXT: type_str = "[TXT]"; break;
+            case FILE_TYPE_BMP: type_str = "[BMP]"; break;
+            case FILE_TYPE_PNG: type_str = "[PNG]"; break;
+            case FILE_TYPE_JPG: type_str = "[JPG]"; break;
+            default: type_str = "[???]"; break;
+        }
+        
+        snprintf(line, sizeof(line), "%s %s", type_str, g_reader_ctx.browser.files[i].name);
+        
+        // Highlight current selection
+        if (i == g_reader_ctx.browser.current_index) {
+            Paint_DrawRectangle(5, y_pos - 2, 470, y_pos + 22, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+            Paint_DrawString_EN(10, y_pos, line, &Font20, WHITE, BLACK);
+        } else {
+            Paint_DrawString_EN(10, y_pos, line, &Font20, BLACK, WHITE);
+        }
+        
+        y_pos += 24;
+    }
+    
+    // Draw instructions at bottom
+    char info[100];
+    snprintf(info, sizeof(info), "File %d/%d - Short:Next Long:Open", 
+             g_reader_ctx.browser.current_index + 1, g_reader_ctx.browser.file_count);
+    Paint_DrawString_EN(10, 450, info, &Font16, BLACK, WHITE);
+    
+    EPD_4in26_Display(g_image_buffer);
+}
+
+/**
+ * @brief Open selected file
+ */
+static int open_selected_file(void)
+{
+    if (g_reader_ctx.browser.current_index >= g_reader_ctx.browser.file_count) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    file_info_t *file = &g_reader_ctx.browser.files[g_reader_ctx.browser.current_index];
+    char filepath[300];
+    snprintf(filepath, sizeof(filepath), "%s/%s", SDCARD_MOUNT_PATH, file->name);
+    
+    PR_NOTICE("Opening file: %s (type=%d)", filepath, file->type);
+    
+    // Clear previous content
+    if (g_reader_ctx.content) {
+        tal_free(g_reader_ctx.content);
+        g_reader_ctx.content = NULL;
+    }
+    if (g_reader_ctx.page_offsets) {
+        tal_free(g_reader_ctx.page_offsets);
+        g_reader_ctx.page_offsets = NULL;
+    }
+    
+    if (file->type == FILE_TYPE_TXT) {
+        // Read text file
+        int rt = sd_read_text_file(filepath, &g_reader_ctx.content, &g_reader_ctx.content_size);
+        if (rt != OPRT_OK) {
+            PR_ERR("Failed to read text file");
+            return rt;
+        }
+        
+        // Calculate pages
+        rt = calculate_page_offsets();
+        if (rt != OPRT_OK) {
+            PR_ERR("Failed to calculate pages");
+            tal_free(g_reader_ctx.content);
+            g_reader_ctx.content = NULL;
+            return rt;
+        }
+        
+        g_reader_ctx.current_page = 0;
+        g_reader_ctx.mode = MODE_TEXT_READER;
+        g_reader_ctx.browser.is_file_open = 1;
+        
+        display_page();
+        
+    } else if (file->type == FILE_TYPE_BMP) {
+        // Display BMP image
+        Paint_Clear(WHITE);
+        
+        int rt = sd_display_bmp_image(filepath);
+        if (rt != OPRT_OK) {
+            Paint_DrawString_EN(100, 200, "Failed to load image", &Font24, BLACK, WHITE);
+        }
+        
+        // Draw filename at top
+        Paint_DrawString_EN(10, 2, file->name, &Font20, BLACK, WHITE);
+        Paint_DrawString_EN(10, 450, "Long press to return", &Font16, BLACK, WHITE);
+        
+        EPD_4in26_Display(g_image_buffer);
+        
+        g_reader_ctx.mode = MODE_IMAGE_VIEWER;
+        g_reader_ctx.browser.is_file_open = 1;
+        
+    } else if (file->type == FILE_TYPE_PNG || file->type == FILE_TYPE_JPG) {
+        // PNG/JPG not fully supported yet
+        Paint_Clear(WHITE);
+        Paint_DrawString_EN(80, 200, "PNG/JPG support coming soon", &Font24, BLACK, WHITE);
+        Paint_DrawString_EN(100, 240, "Please convert to BMP", &Font20, BLACK, WHITE);
+        Paint_DrawString_EN(10, 450, "Long press to return", &Font16, BLACK, WHITE);
+        EPD_4in26_Display(g_image_buffer);
+        
+        g_reader_ctx.mode = MODE_IMAGE_VIEWER;
+        g_reader_ctx.browser.is_file_open = 1;
+    }
+    
+    return OPRT_OK;
+}
+
+/**
+ * @brief Close current file and return to browser
+ */
+static void close_current_file(void)
+{
+    PR_NOTICE("Closing current file");
+    
+    if (g_reader_ctx.content) {
+        tal_free(g_reader_ctx.content);
+        g_reader_ctx.content = NULL;
+    }
+    if (g_reader_ctx.page_offsets) {
+        tal_free(g_reader_ctx.page_offsets);
+        g_reader_ctx.page_offsets = NULL;
+    }
+    
+    g_reader_ctx.mode = MODE_FILE_BROWSER;
+    g_reader_ctx.browser.is_file_open = 0;
+    g_reader_ctx.current_page = 0;
+    g_reader_ctx.total_pages = 0;
+    
+    display_file_browser();
+}
+
+/**
  * @brief Button event handler
  */
 static void button_handler(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *arg)
@@ -802,10 +970,10 @@ static void button_handler(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *arg
     PR_DEBUG("Button: %s, Event: %d", name, event);
     
     if (event == TDL_BUTTON_PRESS_DOWN) {
-        // Short press = Next page
+        // Short press
         g_reader_ctx.button_event = 1;
     } else if (event == TDL_BUTTON_LONG_PRESS_START) {
-        // Long press = Previous page
+        // Long press
         g_reader_ctx.button_event = -1;
     }
 }
@@ -941,38 +1109,97 @@ void EPD_network_novel_test(void)
     
     g_reader_ctx.content_loaded = 1;
     
+    // Initialize SD card
+    g_reader_ctx.sd_available = 0;
+    if (sd_card_init() == OPRT_OK) {
+        PR_NOTICE("SD card initialized");
+        g_reader_ctx.sd_available = 1;
+        
+        // Create sample files if needed
+        sd_create_sample_files();
+        
+        // Scan files
+        if (sd_scan_files(&g_reader_ctx.browser) == OPRT_OK && g_reader_ctx.browser.file_count > 0) {
+            PR_NOTICE("Found %d files on SD card", g_reader_ctx.browser.file_count);
+            g_reader_ctx.mode = MODE_FILE_BROWSER;
+            
+            // Display file browser
+            display_file_browser();
+        } else {
+            PR_WARN("No supported files found on SD card, showing embedded novel");
+            g_reader_ctx.mode = MODE_TEXT_READER;
+            display_page();
+        }
+    } else {
+        PR_WARN("SD card not available, showing embedded novel");
+        g_reader_ctx.mode = MODE_TEXT_READER;
+        display_page();
+    }
+    
     // Initialize button
     if (init_button() != OPRT_OK) {
         PR_WARN("Button init failed, continuing without button control");
     }
     
-    // Display first page
-    display_page();
-    
-    // Main loop - handle button events
-    PR_NOTICE("Entering main loop. Use button to navigate:");
-    PR_NOTICE("  Short press = Next page");
-    PR_NOTICE("  Long press = Previous page");
+    // Main loop - handle button events based on mode
+    PR_NOTICE("Entering main loop");
+    PR_NOTICE("Controls:");
+    PR_NOTICE("  File Browser: Short=Next file, Long=Open file");
+    PR_NOTICE("  Text Reader: Short=Next page, Long=Close file");
+    PR_NOTICE("  Image Viewer: Long=Close file");
     
     while (1) {
         if (g_reader_ctx.button_event != 0) {
-            if (g_reader_ctx.button_event == 1) {
-                // Next page
-                if (g_reader_ctx.current_page < g_reader_ctx.total_pages - 1) {
-                    g_reader_ctx.current_page++;
-                    display_page();
-                } else {
-                    PR_NOTICE("Already at last page");
+            
+            if (g_reader_ctx.mode == MODE_FILE_BROWSER) {
+                // File browser mode
+                if (g_reader_ctx.button_event == 1) {
+                    // Short press: Next file
+                    g_reader_ctx.browser.current_index++;
+                    if (g_reader_ctx.browser.current_index >= g_reader_ctx.browser.file_count) {
+                        g_reader_ctx.browser.current_index = 0;
+                    }
+                    display_file_browser();
+                } else if (g_reader_ctx.button_event == -1) {
+                    // Long press: Open file
+                    open_selected_file();
                 }
-            } else if (g_reader_ctx.button_event == -1) {
-                // Previous page
-                if (g_reader_ctx.current_page > 0) {
-                    g_reader_ctx.current_page--;
-                    display_page();
-                } else {
-                    PR_NOTICE("Already at first page");
+                
+            } else if (g_reader_ctx.mode == MODE_TEXT_READER) {
+                // Text reader mode
+                if (g_reader_ctx.button_event == 1) {
+                    // Short press: Next page
+                    if (g_reader_ctx.current_page < g_reader_ctx.total_pages - 1) {
+                        g_reader_ctx.current_page++;
+                        display_page();
+                    } else {
+                        PR_NOTICE("Already at last page");
+                    }
+                } else if (g_reader_ctx.button_event == -1) {
+                    // Long press: Close file (if from SD card)
+                    if (g_reader_ctx.sd_available && g_reader_ctx.browser.is_file_open) {
+                        close_current_file();
+                    } else {
+                        // Previous page for embedded novel
+                        if (g_reader_ctx.current_page > 0) {
+                            g_reader_ctx.current_page--;
+                            display_page();
+                        } else {
+                            PR_NOTICE("Already at first page");
+                        }
+                    }
+                }
+                
+            } else if (g_reader_ctx.mode == MODE_IMAGE_VIEWER) {
+                // Image viewer mode
+                if (g_reader_ctx.button_event == -1) {
+                    // Long press: Close image
+                    if (g_reader_ctx.sd_available) {
+                        close_current_file();
+                    }
                 }
             }
+            
             g_reader_ctx.button_event = 0;
         }
         
