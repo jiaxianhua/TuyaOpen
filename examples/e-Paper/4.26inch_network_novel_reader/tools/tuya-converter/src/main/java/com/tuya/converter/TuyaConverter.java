@@ -77,7 +77,27 @@ public class TuyaConverter {
         System.out.println("Target size: " + targetWidth + "x" + targetHeight);
         
         // Read input image
-        BufferedImage originalImage = ImageIO.read(inputFile);
+        BufferedImage originalImage = null;
+        String extension = getFileExtension(inputFile.getName()).toLowerCase();
+        
+        // Check if this is a HEIC/HEIF file and if required support is available
+        if (extension.equals("heic") || extension.equals("heif")) {
+            System.err.println("\n⚠️  HEIC/HEIC FORMAT NOT SUPPORTED");
+            System.err.println("=================================");
+            System.err.println("This build of Tuya Converter does not support HEIC/HEIF format.");
+            System.err.println("");
+            System.err.println("To convert your HEIC file, please:");
+            System.err.println("1. On macOS: Open with Photos app, then File → Export → Export Unmodified Original");
+            System.err.println("2. On Windows: Open with Photos app, then Save as JPEG");
+            System.err.println("3. Use online converter: https://heictojpg.com");
+            System.err.println("");
+            System.err.println("After converting to JPEG/PNG, run this tool again.");
+            System.err.println("");
+            System.exit(2);
+        }
+        
+        // Read the image (for non-HEIC formats)
+        originalImage = ImageIO.read(inputFile);
         if (originalImage == null) {
             throw new IOException("Failed to read image file");
         }

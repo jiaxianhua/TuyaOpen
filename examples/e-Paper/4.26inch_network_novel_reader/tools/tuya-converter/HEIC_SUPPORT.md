@@ -11,42 +11,37 @@ HEIC (High Efficiency Image Container) 是 Apple 在 iOS 11 和 macOS High Sierr
 
 ## Tuya Converter 的 HEIC 支持
 
-### 支持的格式
-- ✅ `.heic` - Apple HEIC 格式
-- ✅ `.heif` - HEIF 标准格式
+### 当前状态
 
-### 使用方法
+⚠️ **重要提示**：由于依赖库问题，当前版本 (v1.1.0) **暂不支持** HEIC/HEIF 格式的直接转换。
 
-#### 1. 转换单个 HEIC 文件
+### 解决方案
 
-```bash
-java -jar target/tuya-converter.jar photo.heic
-# 输出: photo_tuya.bmp
-```
+在 HEIC 支持恢复之前，请使用以下方法之一转换 HEIC 文件：
 
-#### 2. 批量转换 iPhone 照片
+#### 方法 1：使用系统自带工具转换
 
-**macOS/Linux:**
-```bash
-for f in *.heic; do 
-    java -jar target/tuya-converter.jar "$f"
-done
-```
+**macOS:**
+1. 使用"照片"应用打开 HEIC 文件
+2. 选择"文件" → "导出" → "导出未修改的原片"
+3. 在格式中选择 JPEG 或 PNG
+4. 使用转换后的文件
 
-**Windows (PowerShell):**
-```powershell
-Get-ChildItem *.heic | ForEach-Object { 
-    java -jar target/tuya-converter.jar $_.FullName 
-}
-```
+**Windows:**
+1. 使用"照片"应用打开 HEIC 文件
+2. 点击"保存"图标
+3. 选择 JPEG 格式保存
 
-#### 3. 拖拽转换
+#### 方法 2：使用在线转换工具
 
-直接将 HEIC 文件拖到 `tuya-convert.sh` (macOS/Linux) 或 `tuya-convert.bat` (Windows) 上即可。
+1. 访问在线 HEIC 转换网站（如 heictojpg.com）
+2. 上传 HEIC 文件
+3. 下载转换后的 JPEG 文件
+4. 使用转换后的文件
 
-### 技术实现
+### 技术实现（计划中）
 
-Tuya Converter 使用以下库来支持 HEIC 格式：
+Tuya Converter 计划使用以下库来支持 HEIC 格式：
 
 1. **TwelveMonkeys ImageIO** - 扩展 Java ImageIO 功能
 2. **imageio-heif** - 提供 HEIF/HEIC 解码支持
