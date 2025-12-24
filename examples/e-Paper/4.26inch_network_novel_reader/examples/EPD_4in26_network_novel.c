@@ -100,6 +100,11 @@ typedef struct {
     volatile int long_press_detected;
     volatile TIME_T last_click_time;
     volatile TIME_T action_trigger_time;
+    
+    // Paged reading for large files
+    char current_filepath[300];  // Path to currently open file
+    int use_paged_reading;       // 1 if using paged reading mode
+    int page_size;               // Size of each page in bytes (e.g., 1024 for 1KB)
 } novel_reader_ctx_t;
 
 /***********************************************************
@@ -396,7 +401,7 @@ static int get_char_byte_len(const char *str, int pos, int max_len)
 }
 
 /**
- * @brief Calculate page offsets for content
+ * @brief Calculate page offsets for content (for in-memory content only)
  */
 static int calculate_page_offsets(void)
 {
@@ -472,6 +477,37 @@ static int calculate_page_offsets(void)
     
     PR_NOTICE("Calculated %d pages", page_count);
     
+    return OPRT_OK;
+}
+
+/**
+ * @brief Load a page dynamically from file (for paged reading mode)
+ */
+static int load_page_from_file(int page_num)
+{
+    if (!g_reader_ctx.use_paged_reading) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    // Free previous page content
+    if (g_reader_ctx.content) {
+        tal_free(g_reader_ctx.content);
+        g_reader_ctx.content = NULL;
+        g_reader_ctx.content_size = 0;
+    }
+    
+    // Read the requested page
+    int rt = sd_read_text_page(g_reader_ctx.current_filepath, page_num, 
+                               g_reader_ctx.page_size, 
+                               &g_reader_ctx.content, 
+                               &g_reader_ctx.content_size);
+    
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to read page %d", page_num);
+        return rt;
+    }
+    
+    PR_DEBUG("Loaded page %d: %d bytes", page_num, g_reader_ctx.content_size);
     return OPRT_OK;
 }
 /**
@@ -684,7 +720,18 @@ static void draw_gbk_char24(int x, int y, unsigned char gb_high, unsigned char g
  */
 static void display_page(void)
 {
-    if (!g_reader_ctx.content || !g_reader_ctx.page_offsets) {
+    // For paged reading mode, load the page first
+    if (g_reader_ctx.use_paged_reading) {
+        if (load_page_from_file(g_reader_ctx.current_page) != OPRT_OK) {
+            PR_ERR("Failed to load page");
+            Paint_Clear(WHITE);
+            Paint_DrawString_EN(100, 200, "Failed to load page", &Font24, BLACK, WHITE);
+            EPD_4in26_Display(g_image_buffer);
+            return;
+        }
+    }
+    
+    if (!g_reader_ctx.content) {
         PR_ERR("No content to display");
         return;
     }
@@ -733,11 +780,17 @@ static void display_page(void)
     // For ROTATE_90, the actual display width is 480 (height becomes width)
     draw_gbk_char24(10, 2, 0xBC, 0xD6, BLACK, WHITE);
     
-    // Get page start position
-    int page_start = g_reader_ctx.page_offsets[g_reader_ctx.current_page];
-    int page_end = (g_reader_ctx.current_page + 1 < g_reader_ctx.total_pages) 
+    // For paged reading, we display the entire loaded page content
+    // For in-memory content, we use page offsets
+    int page_start = 0;
+    int page_end = g_reader_ctx.content_size;
+    
+    if (!g_reader_ctx.use_paged_reading && g_reader_ctx.page_offsets) {
+        page_start = g_reader_ctx.page_offsets[g_reader_ctx.current_page];
+        page_end = (g_reader_ctx.current_page + 1 < g_reader_ctx.total_pages) 
                    ? g_reader_ctx.page_offsets[g_reader_ctx.current_page + 1] 
                    : g_reader_ctx.content_size;
+    }
     
     // Draw content line by line
     int y_pos = 24;  // Start right after compact header
@@ -904,25 +957,26 @@ static int open_selected_file(void)
     }
     
     if (file->type == FILE_TYPE_TXT) {
-        // Read text file
-        int rt = sd_read_text_file(filepath, &g_reader_ctx.content, &g_reader_ctx.content_size);
-        if (rt != OPRT_OK) {
-            PR_ERR("Failed to read text file");
-            return rt;
+        // Store filepath for paged reading
+        strncpy(g_reader_ctx.current_filepath, filepath, sizeof(g_reader_ctx.current_filepath) - 1);
+        
+        // Use 1KB page size for paged reading (as requested by user)
+        g_reader_ctx.page_size = 1024;  // 1KB per page
+        
+        // Get total page count
+        int page_count = sd_get_page_count(filepath, g_reader_ctx.page_size);
+        if (page_count <= 0) {
+            PR_ERR("Failed to get page count");
+            return OPRT_COM_ERROR;
         }
         
-        // Calculate pages
-        rt = calculate_page_offsets();
-        if (rt != OPRT_OK) {
-            PR_ERR("Failed to calculate pages");
-            tal_free(g_reader_ctx.content);
-            g_reader_ctx.content = NULL;
-            return rt;
-        }
-        
+        g_reader_ctx.total_pages = page_count;
         g_reader_ctx.current_page = 0;
+        g_reader_ctx.use_paged_reading = 1;
         g_reader_ctx.mode = MODE_TEXT_READER;
         g_reader_ctx.browser.is_file_open = 1;
+        
+        PR_NOTICE("Using paged reading: %d pages of %d bytes each", page_count, g_reader_ctx.page_size);
         
         display_page();
         
@@ -979,6 +1033,8 @@ static void close_current_file(void)
     g_reader_ctx.browser.is_file_open = 0;
     g_reader_ctx.current_page = 0;
     g_reader_ctx.total_pages = 0;
+    g_reader_ctx.use_paged_reading = 0;
+    g_reader_ctx.current_filepath[0] = '\0';
     
     display_file_browser();
 }

@@ -84,6 +84,25 @@ file_type_e sd_get_file_type(const char *filename);
 int sd_read_text_file(const char *filepath, char **buffer, int *size);
 
 /**
+ * @brief Read a page of text from file
+ * @param filepath Full file path
+ * @param page_num Page number (0-based)
+ * @param page_size Size of each page in bytes
+ * @param buffer Output buffer (will be allocated)
+ * @param size Output size
+ * @return OPRT_OK on success
+ */
+int sd_read_text_page(const char *filepath, int page_num, int page_size, char **buffer, int *size);
+
+/**
+ * @brief Get total number of pages in a text file
+ * @param filepath Full file path
+ * @param page_size Size of each page in bytes
+ * @return Number of pages, or negative on error
+ */
+int sd_get_page_count(const char *filepath, int page_size);
+
+/**
  * @brief Display BMP image on e-paper
  * @param filepath Full file path
  * @return OPRT_OK on success

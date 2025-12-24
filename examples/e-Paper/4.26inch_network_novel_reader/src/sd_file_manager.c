@@ -244,11 +244,15 @@ int sd_read_text_file(const char *filepath, char **buffer, int *size)
     long file_size = tkl_ftell(fp);
     tkl_fseek(fp, 0, SEEK_SET);
     
-    if (file_size <= 0 || file_size > 1024 * 1024) {
-        PR_ERR("Invalid file size: %ld", file_size);
+    // Increased limit to 50 MB for large novels
+    // Note: For very large files, consider reading in chunks
+    if (file_size <= 0 || file_size > 50 * 1024 * 1024) {
+        PR_ERR("Invalid file size: %ld (max 50 MB)", file_size);
         tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
+    
+    PR_NOTICE("File size: %ld bytes (%.2f MB)", file_size, file_size / (1024.0 * 1024.0));
     
     // Allocate buffer
     *buffer = (char *)tal_malloc(file_size + 1);
@@ -274,6 +278,111 @@ int sd_read_text_file(const char *filepath, char **buffer, int *size)
     tkl_fclose(fp);
     
     PR_NOTICE("Read %d bytes from file", bytes_read);
+    return OPRT_OK;
+}
+
+/**
+ * @brief Get total number of pages in a text file
+ */
+int sd_get_page_count(const char *filepath, int page_size)
+{
+    if (!filepath || page_size <= 0) return OPRT_INVALID_PARM;
+    
+    TUYA_FILE fp = tkl_fopen(filepath, "r");
+    if (!fp) {
+        PR_ERR("Failed to open file: %s", filepath);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Get file size
+    tkl_fseek(fp, 0, SEEK_END);
+    long file_size = tkl_ftell(fp);
+    tkl_fclose(fp);
+    
+    if (file_size <= 0) {
+        return OPRT_COM_ERROR;
+    }
+    
+    // Calculate number of pages
+    int page_count = (file_size + page_size - 1) / page_size;
+    
+    PR_DEBUG("File size: %ld bytes, Page size: %d bytes, Pages: %d", 
+             file_size, page_size, page_count);
+    
+    return page_count;
+}
+
+/**
+ * @brief Read a page of text from file
+ * This function reads only one page at a time to save memory
+ */
+int sd_read_text_page(const char *filepath, int page_num, int page_size, char **buffer, int *size)
+{
+    if (!filepath || !buffer || !size || page_num < 0 || page_size <= 0) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    PR_DEBUG("Reading page %d (size: %d bytes) from: %s", page_num, page_size, filepath);
+    
+    TUYA_FILE fp = tkl_fopen(filepath, "r");
+    if (!fp) {
+        PR_ERR("Failed to open file: %s", filepath);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Get file size
+    tkl_fseek(fp, 0, SEEK_END);
+    long file_size = tkl_ftell(fp);
+    
+    if (file_size <= 0) {
+        PR_ERR("Invalid file size: %ld", file_size);
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Calculate offset and actual read size
+    long offset = (long)page_num * page_size;
+    
+    if (offset >= file_size) {
+        PR_ERR("Page %d is beyond file size", page_num);
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Calculate how much to read (might be less than page_size for last page)
+    int read_size = page_size;
+    if (offset + read_size > file_size) {
+        read_size = file_size - offset;
+    }
+    
+    // Seek to page start
+    tkl_fseek(fp, offset, SEEK_SET);
+    
+    // Allocate buffer for this page only
+    *buffer = (char *)tal_malloc(read_size + 1);
+    if (!*buffer) {
+        PR_ERR("Memory allocation failed for %d bytes", read_size + 1);
+        tkl_fclose(fp);
+        return OPRT_MALLOC_FAILED;
+    }
+    
+    // Read page
+    int bytes_read = tkl_fread(*buffer, read_size, fp);
+    if (bytes_read <= 0) {
+        PR_ERR("Failed to read page");
+        tal_free(*buffer);
+        *buffer = NULL;
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    (*buffer)[bytes_read] = '\0';
+    *size = bytes_read;
+    
+    tkl_fclose(fp);
+    
+    PR_DEBUG("Read page %d: %d bytes (offset: %ld)", page_num, bytes_read, offset);
+    
     return OPRT_OK;
 }
 
