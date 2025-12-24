@@ -54,35 +54,36 @@
 #define UWORD   uint16_t
 #define UDOUBLE uint32_t
 
-/**
- * GPIOI config
-**/
-#ifndef EPD_SCLK_PIN
-#define EPD_SCLK_PIN    TUYA_GPIO_NUM_14
-#endif
 
+/**
+ * GPIO0 config
+**/
 #ifndef EPD_MOSI_PIN
 #define EPD_MOSI_PIN    TUYA_GPIO_NUM_16
 #endif
 
+#ifndef EPD_SCLK_PIN
+#define EPD_SCLK_PIN    TUYA_GPIO_NUM_14
+#endif
+
 #ifndef EPD_CS_PIN      
-#define EPD_CS_PIN      TUYA_GPIO_NUM_45
+#define EPD_CS_PIN      TUYA_GPIO_NUM_18
 #endif
 
 #ifndef EPD_DC_PIN
-#define EPD_DC_PIN      TUYA_GPIO_NUM_7
+#define EPD_DC_PIN      TUYA_GPIO_NUM_19
 #endif
 
 #ifndef EPD_RST_PIN
-#define EPD_RST_PIN     TUYA_GPIO_NUM_8
+#define EPD_RST_PIN     TUYA_GPIO_NUM_47
 #endif
 
 #ifndef EPD_BUSY_PIN
-#define EPD_BUSY_PIN    TUYA_GPIO_NUM_6
+#define EPD_BUSY_PIN    TUYA_GPIO_NUM_46
 #endif
 
 #ifndef EPD_PWR_PIN
-#define EPD_PWR_PIN     TUYA_GPIO_NUM_28
+#define EPD_PWR_PIN     TUYA_GPIO_NUM_40
 #endif
 
 /**
