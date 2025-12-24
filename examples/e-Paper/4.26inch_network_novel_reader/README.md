@@ -67,30 +67,56 @@ See [BUTTON_SETUP.md](BUTTON_SETUP.md) for detailed button configuration guide.
 
 ## Usage Modes
 
+The system automatically selects the best content source based on availability:
+
+### Priority Order
+1. **SD Card Files** (Highest Priority)
+   - If SD card is detected and has supported files
+   - Shows file browser interface
+   - User can browse and open files
+
+2. **Network Novel** (Medium Priority)
+   - If SD card is not available or empty
+   - Connects to WiFi and downloads novel from URL
+   - Displays downloaded content
+
+3. **Embedded Novel** (Fallback)
+   - If both SD card and network are unavailable
+   - Uses built-in sample novel
+   - Always available as last resort
+
 ### Mode 1: SD Card File Browser (Recommended)
 1. Insert SD card with TXT/BMP files
 2. Power on device
-3. Browse files with short button press
-4. Open files with long button press (3s)
-5. Read/view content, long press to return
+3. System detects SD card and shows file browser
+4. Browse files with single/double click
+5. Open files with long press (2s)
+6. Read/view content
 
 ### Mode 2: Network Novel Reader
-1. Configure WiFi credentials
-2. Set novel URL
-3. Device downloads and displays novel
+1. No SD card or SD card is empty
+2. Configure WiFi credentials
+3. Device downloads novel from URL
 4. Use buttons to navigate pages
 
 ### Mode 3: Embedded Novel (Fallback)
-- If no SD card or network, displays built-in sample novel
+- If no SD card and no network
+- Displays built-in sample novel
 - Useful for testing and demonstration
 
 ## Button Controls Summary
 
-| Mode | Short Press | Long Press (3s) |
-|------|-------------|-----------------|
-| **File Browser** | Next file | Open file |
-| **Text Reader** | Next page | Close file / Previous page |
-| **Image Viewer** | - | Close image |
+| Mode | Single Click | Double Click | Long Press (2s) |
+|------|--------------|--------------|-----------------|
+| **File Browser** | Next file | Previous file | Open file |
+| **Text Reader** | Next page | Previous page | Close file |
+| **Image Viewer** | - | - | Close image |
+
+**重要提示 / Important Note**: 
+- 所有点击后需等待 2 秒才会执行动作
+- All clicks require 2 seconds wait before action executes
+- 这样可以准确识别单击、双击或长按
+- This allows accurate detection of single, double, or long press
 
 ## Configuration
 

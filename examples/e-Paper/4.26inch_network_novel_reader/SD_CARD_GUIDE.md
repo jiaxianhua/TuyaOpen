@@ -13,12 +13,14 @@ This e-paper reader now supports SD card file browsing and display. You can read
 
 ## Supported File Types
 
-| Type | Extension | Description |
-|------|-----------|-------------|
-| Text | `.txt` | Plain text files (ASCII/GBK) |
-| Image | `.bmp` | Bitmap images (1-bit monochrome recommended) |
-| Image | `.png` | PNG images (coming soon) |
-| Image | `.jpg` | JPEG images (coming soon) |
+| Type | Extension | Description | Auto-Convert |
+|------|-----------|-------------|--------------|
+| Text | `.txt` | Plain text files (ASCII/GBK) | - |
+| Image | `.bmp` | Bitmap images (1/24/32-bit) | ✅ Yes |
+| Image | `.png` | PNG images (coming soon) | - |
+| Image | `.jpg` | JPEG images (coming soon) | - |
+
+**Note**: 24-bit and 32-bit color BMP images are automatically converted to monochrome for display.
 
 ## Button Controls
 

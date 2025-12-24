@@ -9,6 +9,7 @@
 #include "tkl_fs.h"
 #include "tkl_output.h"
 #include "GUI_BMPfile.h"
+#include "GUI_Paint.h"
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -277,7 +278,7 @@ int sd_read_text_file(const char *filepath, char **buffer, int *size)
 }
 
 /**
- * @brief Display BMP image
+ * @brief Display BMP image using TuyaOpen filesystem (supports color conversion)
  */
 int sd_display_bmp_image(const char *filepath)
 {
@@ -285,13 +286,216 @@ int sd_display_bmp_image(const char *filepath)
     
     PR_NOTICE("Displaying BMP image: %s", filepath);
     
-    // Use GUI_ReadBmp to display the image
-    UBYTE result = GUI_ReadBmp(filepath, 0, 0);
-    
-    if (result != 0) {
-        PR_ERR("Failed to display BMP image");
+    // Check if file exists
+    BOOL_T exists = FALSE;
+    if (tkl_fs_is_exist(filepath, &exists) != OPRT_OK || !exists) {
+        PR_ERR("File does not exist: %s", filepath);
         return OPRT_COM_ERROR;
     }
     
+    // Open file using TuyaOpen API
+    TUYA_FILE fp = tkl_fopen(filepath, "rb");
+    if (!fp) {
+        PR_ERR("Failed to open BMP file: %s", filepath);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Read BMP file header (14 bytes)
+    unsigned char file_header[14];
+    if (tkl_fread(file_header, 14, fp) != 14) {
+        PR_ERR("Failed to read BMP file header");
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Check BMP signature
+    if (file_header[0] != 0x42 || file_header[1] != 0x4D) {
+        PR_ERR("Not a valid BMP file (signature mismatch)");
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Read BMP info header (40 bytes)
+    unsigned char info_header[40];
+    if (tkl_fread(info_header, 40, fp) != 40) {
+        PR_ERR("Failed to read BMP info header");
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Parse image dimensions
+    int width = *(int *)&info_header[4];
+    int height = *(int *)&info_header[8];
+    int bit_count = *(short *)&info_header[14];
+    int compression = *(int *)&info_header[16];
+    
+    PR_NOTICE("BMP: %dx%d, %d bits per pixel, compression=%d", width, height, bit_count, compression);
+    
+    // Handle negative height (top-down bitmap)
+    int is_top_down = 0;
+    if (height < 0) {
+        height = -height;
+        is_top_down = 1;
+        PR_DEBUG("Top-down bitmap detected");
+    }
+    
+    // Check for compression
+    // 0 = BI_RGB (no compression)
+    // 3 = BI_BITFIELDS (with color masks, common for 32-bit BMP)
+    if (compression != 0 && compression != 3) {
+        PR_ERR("Unsupported BMP compression: %d (only 0=BI_RGB and 3=BI_BITFIELDS supported)", compression);
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    // For BI_BITFIELDS (compression=3), skip the color masks (12 bytes)
+    if (compression == 3 && (bit_count == 16 || bit_count == 32)) {
+        PR_DEBUG("Skipping BI_BITFIELDS color masks");
+        unsigned char color_masks[12];
+        tkl_fread(color_masks, 12, fp);  // Skip R, G, B masks
+    }
+    
+    // Handle different bit depths
+    if (bit_count == 1) {
+        // 1-bit monochrome - original code
+        PR_NOTICE("Processing 1-bit monochrome BMP");
+        
+        // Read color palette (8 bytes for 1-bit BMP)
+        unsigned char palette[8];
+        if (tkl_fread(palette, 8, fp) != 8) {
+            PR_ERR("Failed to read color palette");
+            tkl_fclose(fp);
+            return OPRT_COM_ERROR;
+        }
+        
+        // Determine black and white colors from palette
+        UWORD black_color = BLACK;
+        UWORD white_color = WHITE;
+        if (palette[0] == 0xFF && palette[1] == 0xFF && palette[2] == 0xFF) {
+            black_color = BLACK;
+            white_color = WHITE;
+        } else {
+            black_color = WHITE;
+            white_color = BLACK;
+        }
+        
+        // Calculate row size (must be multiple of 4 bytes)
+        int row_size = ((width + 31) / 32) * 4;
+        
+        // Allocate buffer for one row
+        unsigned char *row_buffer = (unsigned char *)tal_malloc(row_size);
+        if (!row_buffer) {
+            PR_ERR("Memory allocation failed");
+            tkl_fclose(fp);
+            return OPRT_MALLOC_FAILED;
+        }
+        
+        // Read and display image data
+        for (int y = 0; y < height; y++) {
+            if (tkl_fread(row_buffer, row_size, fp) != row_size) {
+                PR_ERR("Failed to read image data at row %d", y);
+                tal_free(row_buffer);
+                tkl_fclose(fp);
+                return OPRT_COM_ERROR;
+            }
+            
+            // Draw pixels (BMP is stored bottom-up unless top-down flag set)
+            int display_y = is_top_down ? y : (height - y - 1);
+            
+            for (int x = 0; x < width; x++) {
+                int byte_idx = x / 8;
+                int bit_idx = 7 - (x % 8);
+                
+                UWORD color = (row_buffer[byte_idx] & (1 << bit_idx)) ? white_color : black_color;
+                Paint_SetPixel(x, display_y, color);
+            }
+        }
+        
+        tal_free(row_buffer);
+        
+    } else if (bit_count == 24 || bit_count == 32) {
+        // 24-bit or 32-bit color - convert to monochrome
+        PR_NOTICE("Converting %d-bit color BMP to monochrome", bit_count);
+        
+        int bytes_per_pixel = bit_count / 8;
+        int row_size = ((width * bytes_per_pixel + 3) / 4) * 4;  // Aligned to 4 bytes
+        
+        // Get pixel data offset from file header
+        int pixel_data_offset = *(int *)&file_header[10];
+        PR_DEBUG("Pixel data offset: %d", pixel_data_offset);
+        
+        // Seek to pixel data start
+        // We've already read 14 (file header) + 40 (info header) = 54 bytes
+        // For BI_BITFIELDS, we also read 12 bytes of color masks
+        int bytes_read = 54;
+        if (compression == 3) {
+            bytes_read += 12;  // Color masks
+        }
+        
+        // Skip any remaining header data
+        if (pixel_data_offset > bytes_read) {
+            int skip_bytes = pixel_data_offset - bytes_read;
+            PR_DEBUG("Skipping %d bytes to reach pixel data", skip_bytes);
+            unsigned char *skip_buffer = (unsigned char *)tal_malloc(skip_bytes);
+            if (skip_buffer) {
+                tkl_fread(skip_buffer, skip_bytes, fp);
+                tal_free(skip_buffer);
+            } else {
+                // If malloc fails, seek byte by byte
+                for (int i = 0; i < skip_bytes; i++) {
+                    unsigned char dummy;
+                    tkl_fread(&dummy, 1, fp);
+                }
+            }
+        }
+        
+        // Allocate buffer for one row
+        unsigned char *row_buffer = (unsigned char *)tal_malloc(row_size);
+        if (!row_buffer) {
+            PR_ERR("Memory allocation failed");
+            tkl_fclose(fp);
+            return OPRT_MALLOC_FAILED;
+        }
+        
+        // Read and convert image data
+        for (int y = 0; y < height; y++) {
+            if (tkl_fread(row_buffer, row_size, fp) != row_size) {
+                PR_ERR("Failed to read image data at row %d", y);
+                tal_free(row_buffer);
+                tkl_fclose(fp);
+                return OPRT_COM_ERROR;
+            }
+            
+            // Draw pixels with grayscale conversion
+            int display_y = is_top_down ? y : (height - y - 1);
+            
+            for (int x = 0; x < width; x++) {
+                int pixel_offset = x * bytes_per_pixel;
+                
+                // BMP stores as BGR(A)
+                unsigned char blue = row_buffer[pixel_offset];
+                unsigned char green = row_buffer[pixel_offset + 1];
+                unsigned char red = row_buffer[pixel_offset + 2];
+                
+                // Convert to grayscale using standard formula
+                int gray = (red * 299 + green * 587 + blue * 114) / 1000;
+                
+                // Threshold to black or white (128 is middle)
+                UWORD color = (gray > 128) ? WHITE : BLACK;
+                Paint_SetPixel(x, display_y, color);
+            }
+        }
+        
+        tal_free(row_buffer);
+        
+    } else {
+        PR_ERR("Unsupported BMP bit depth: %d (supported: 1, 24, 32)", bit_count);
+        tkl_fclose(fp);
+        return OPRT_COM_ERROR;
+    }
+    
+    tkl_fclose(fp);
+    
+    PR_NOTICE("BMP image displayed successfully");
     return OPRT_OK;
 }

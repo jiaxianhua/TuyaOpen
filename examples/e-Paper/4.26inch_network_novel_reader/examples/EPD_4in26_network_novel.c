@@ -48,12 +48,20 @@
 // Display settings
 #define DISPLAY_WIDTH 800
 #define DISPLAY_HEIGHT 480
-#define CHARS_PER_LINE 37  // Maximum characters per line (800 / 24 = 33.3)
-#define LINES_PER_PAGE 32  // Maximum lines per page (480 / 24 = 20)
+
+// Character counting (NOT pixel-based!)
+// CHARS_PER_LINE counts "character units": ASCII=1 unit, GBK=2 units
+// With ROTATE_90: logical width=480px, can fit ~20 GBK chars (20*24px=480px)
+// But we count in units: 20 GBK chars = 40 units (20*2)
+// Mixed text: "Hello你好" = 5 ASCII (5 units) + 2 GBK (4 units) = 9 units
+#define CHARS_PER_LINE 38  // Character units per line (not pixels!)
+#define LINES_PER_PAGE 32  // Lines per page (800 / 24 = 33.3, use 32 for safety)
 #define BYTES_PER_PAGE 2000  // For GBK encoding (variable byte length)
 
 // Button settings
-#define BUTTON_LONG_PRESS_TIME 3000  // 3 seconds
+#define BUTTON_LONG_PRESS_TIME 2000  // 2 seconds for long press
+#define BUTTON_CLICK_TIMEOUT 500     // 500ms timeout between clicks
+#define BUTTON_ACTION_DELAY 2000     // 2s delay before executing action
 
 /***********************************************************
 ***********************typedef define***********************
@@ -63,6 +71,13 @@ typedef enum {
     MODE_TEXT_READER,       // 文本阅读模式
     MODE_IMAGE_VIEWER       // 图片查看模式
 } app_mode_e;
+
+typedef enum {
+    BUTTON_ACTION_NONE = 0,
+    BUTTON_ACTION_NEXT,      // 单击：下一个
+    BUTTON_ACTION_PREV,      // 双击：上一个
+    BUTTON_ACTION_OPEN       // 长按：打开/关闭
+} button_action_e;
 
 typedef struct {
     char *content;
@@ -79,6 +94,12 @@ typedef struct {
     file_browser_t browser;
     app_mode_e mode;
     int sd_available;
+    
+    // Button click detection
+    volatile int click_count;
+    volatile int long_press_detected;
+    volatile TIME_T last_click_time;
+    volatile TIME_T action_trigger_time;
 } novel_reader_ctx_t;
 
 /***********************************************************
@@ -963,19 +984,73 @@ static void close_current_file(void)
 }
 
 /**
- * @brief Button event handler
+ * @brief Button event handler with click counting
  */
 static void button_handler(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *arg)
 {
     PR_DEBUG("Button: %s, Event: %d", name, event);
     
+    TIME_T current_time = tal_system_get_millisecond();
+    
     if (event == TDL_BUTTON_PRESS_DOWN) {
-        // Short press
-        g_reader_ctx.button_event = 1;
+        // Single click detected
+        TIME_T time_since_last_click = current_time - g_reader_ctx.last_click_time;
+        
+        if (time_since_last_click < BUTTON_CLICK_TIMEOUT) {
+            // Within timeout, increment click count
+            g_reader_ctx.click_count++;
+        } else {
+            // Timeout expired, start new click sequence
+            g_reader_ctx.click_count = 1;
+        }
+        
+        g_reader_ctx.last_click_time = current_time;
+        g_reader_ctx.action_trigger_time = current_time + BUTTON_ACTION_DELAY;
+        g_reader_ctx.long_press_detected = 0;
+        
+        PR_DEBUG("Click count: %d", g_reader_ctx.click_count);
+        
     } else if (event == TDL_BUTTON_LONG_PRESS_START) {
-        // Long press
-        g_reader_ctx.button_event = -1;
+        // Long press detected
+        g_reader_ctx.long_press_detected = 1;
+        g_reader_ctx.action_trigger_time = current_time + BUTTON_ACTION_DELAY;
+        
+        PR_DEBUG("Long press detected");
     }
+}
+
+/**
+ * @brief Process pending button action
+ */
+static button_action_e get_pending_button_action(void)
+{
+    TIME_T current_time = tal_system_get_millisecond();
+    
+    // Check if action delay has expired
+    if (g_reader_ctx.action_trigger_time == 0 || current_time < g_reader_ctx.action_trigger_time) {
+        return BUTTON_ACTION_NONE;
+    }
+    
+    button_action_e action = BUTTON_ACTION_NONE;
+    
+    // Determine action based on long press or click count
+    if (g_reader_ctx.long_press_detected) {
+        action = BUTTON_ACTION_OPEN;
+        PR_NOTICE("Action: OPEN (long press)");
+    } else if (g_reader_ctx.click_count == 1) {
+        action = BUTTON_ACTION_NEXT;
+        PR_NOTICE("Action: NEXT (single click)");
+    } else if (g_reader_ctx.click_count >= 2) {
+        action = BUTTON_ACTION_PREV;
+        PR_NOTICE("Action: PREV (double click, count=%d)", g_reader_ctx.click_count);
+    }
+    
+    // Reset state
+    g_reader_ctx.click_count = 0;
+    g_reader_ctx.long_press_detected = 0;
+    g_reader_ctx.action_trigger_time = 0;
+    
+    return action;
 }
 
 /**
@@ -1060,7 +1135,45 @@ void EPD_network_novel_test(void)
     Paint_SelectImage(g_image_buffer);
     Paint_Clear(WHITE);
     
-    // Show "Connecting..." message
+    // Priority 1: Try SD card first
+    PR_NOTICE("Checking SD card...");
+    Paint_DrawString_EN(150, 300, "Checking SD card...", &Font24, BLACK, WHITE);
+    EPD_4in26_Display(g_image_buffer);
+    
+    g_reader_ctx.sd_available = 0;
+    if (sd_card_init() == OPRT_OK) {
+        PR_NOTICE("SD card initialized");
+        g_reader_ctx.sd_available = 1;
+        
+        // Create sample files if needed
+        sd_create_sample_files();
+        
+        // Scan files
+        if (sd_scan_files(&g_reader_ctx.browser) == OPRT_OK && g_reader_ctx.browser.file_count > 0) {
+            PR_NOTICE("Found %d files on SD card, using SD card mode", g_reader_ctx.browser.file_count);
+            g_reader_ctx.mode = MODE_FILE_BROWSER;
+            g_reader_ctx.content_loaded = 1;
+            
+            // Initialize button
+            if (init_button() != OPRT_OK) {
+                PR_WARN("Button init failed, continuing without button control");
+            }
+            
+            // Display file browser
+            display_file_browser();
+            
+            // Enter main loop
+            goto main_loop;
+        } else {
+            PR_WARN("No supported files found on SD card");
+        }
+    } else {
+        PR_WARN("SD card not available");
+    }
+    
+    // Priority 2: Try network if SD card not available or empty
+    PR_NOTICE("SD card not available or empty, trying network...");
+    Paint_Clear(WHITE);
     Paint_DrawString_EN(150, 300, "Connecting to WiFi...", &Font24, BLACK, WHITE);
     EPD_4in26_Display(g_image_buffer);
     
@@ -1091,7 +1204,7 @@ void EPD_network_novel_test(void)
             }
         }
     } else {
-        // No network, use embedded novel
+        // Priority 3: Use embedded novel if no network
         PR_NOTICE("No network, loading embedded novel...");
         Paint_Clear(WHITE);
         Paint_DrawString_EN(100, 300, "No WiFi Connection", &Font24, BLACK, WHITE);
@@ -1108,99 +1221,87 @@ void EPD_network_novel_test(void)
     }
     
     g_reader_ctx.content_loaded = 1;
-    
-    // Initialize SD card
-    g_reader_ctx.sd_available = 0;
-    if (sd_card_init() == OPRT_OK) {
-        PR_NOTICE("SD card initialized");
-        g_reader_ctx.sd_available = 1;
-        
-        // Create sample files if needed
-        sd_create_sample_files();
-        
-        // Scan files
-        if (sd_scan_files(&g_reader_ctx.browser) == OPRT_OK && g_reader_ctx.browser.file_count > 0) {
-            PR_NOTICE("Found %d files on SD card", g_reader_ctx.browser.file_count);
-            g_reader_ctx.mode = MODE_FILE_BROWSER;
-            
-            // Display file browser
-            display_file_browser();
-        } else {
-            PR_WARN("No supported files found on SD card, showing embedded novel");
-            g_reader_ctx.mode = MODE_TEXT_READER;
-            display_page();
-        }
-    } else {
-        PR_WARN("SD card not available, showing embedded novel");
-        g_reader_ctx.mode = MODE_TEXT_READER;
-        display_page();
-    }
+    g_reader_ctx.mode = MODE_TEXT_READER;
     
     // Initialize button
     if (init_button() != OPRT_OK) {
         PR_WARN("Button init failed, continuing without button control");
     }
     
+    // Display first page
+    display_page();
+
+main_loop:
+    
     // Main loop - handle button events based on mode
     PR_NOTICE("Entering main loop");
     PR_NOTICE("Controls:");
-    PR_NOTICE("  File Browser: Short=Next file, Long=Open file");
-    PR_NOTICE("  Text Reader: Short=Next page, Long=Close file");
-    PR_NOTICE("  Image Viewer: Long=Close file");
+    PR_NOTICE("  Single click: Next file/page");
+    PR_NOTICE("  Double click: Previous file/page");
+    PR_NOTICE("  Long press (2s): Open/Close file");
+    PR_NOTICE("  Note: Wait 2s after clicks for action to execute");
     
     while (1) {
-        if (g_reader_ctx.button_event != 0) {
+        // Check for pending button action
+        button_action_e action = get_pending_button_action();
+        
+        if (action != BUTTON_ACTION_NONE) {
             
             if (g_reader_ctx.mode == MODE_FILE_BROWSER) {
                 // File browser mode
-                if (g_reader_ctx.button_event == 1) {
-                    // Short press: Next file
+                if (action == BUTTON_ACTION_NEXT) {
+                    // Single click: Next file
                     g_reader_ctx.browser.current_index++;
                     if (g_reader_ctx.browser.current_index >= g_reader_ctx.browser.file_count) {
                         g_reader_ctx.browser.current_index = 0;
                     }
                     display_file_browser();
-                } else if (g_reader_ctx.button_event == -1) {
+                } else if (action == BUTTON_ACTION_PREV) {
+                    // Double click: Previous file
+                    g_reader_ctx.browser.current_index--;
+                    if (g_reader_ctx.browser.current_index < 0) {
+                        g_reader_ctx.browser.current_index = g_reader_ctx.browser.file_count - 1;
+                    }
+                    display_file_browser();
+                } else if (action == BUTTON_ACTION_OPEN) {
                     // Long press: Open file
                     open_selected_file();
                 }
                 
             } else if (g_reader_ctx.mode == MODE_TEXT_READER) {
                 // Text reader mode
-                if (g_reader_ctx.button_event == 1) {
-                    // Short press: Next page
+                if (action == BUTTON_ACTION_NEXT) {
+                    // Single click: Next page
                     if (g_reader_ctx.current_page < g_reader_ctx.total_pages - 1) {
                         g_reader_ctx.current_page++;
                         display_page();
                     } else {
                         PR_NOTICE("Already at last page");
                     }
-                } else if (g_reader_ctx.button_event == -1) {
+                } else if (action == BUTTON_ACTION_PREV) {
+                    // Double click: Previous page
+                    if (g_reader_ctx.current_page > 0) {
+                        g_reader_ctx.current_page--;
+                        display_page();
+                    } else {
+                        PR_NOTICE("Already at first page");
+                    }
+                } else if (action == BUTTON_ACTION_OPEN) {
                     // Long press: Close file (if from SD card)
                     if (g_reader_ctx.sd_available && g_reader_ctx.browser.is_file_open) {
                         close_current_file();
-                    } else {
-                        // Previous page for embedded novel
-                        if (g_reader_ctx.current_page > 0) {
-                            g_reader_ctx.current_page--;
-                            display_page();
-                        } else {
-                            PR_NOTICE("Already at first page");
-                        }
                     }
                 }
                 
             } else if (g_reader_ctx.mode == MODE_IMAGE_VIEWER) {
                 // Image viewer mode
-                if (g_reader_ctx.button_event == -1) {
+                if (action == BUTTON_ACTION_OPEN) {
                     // Long press: Close image
                     if (g_reader_ctx.sd_available) {
                         close_current_file();
                     }
                 }
             }
-            
-            g_reader_ctx.button_event = 0;
         }
         
         tal_system_sleep(100);
