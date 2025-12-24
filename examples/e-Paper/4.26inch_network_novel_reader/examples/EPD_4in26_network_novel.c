@@ -890,14 +890,42 @@ static void display_file_browser(void)
     
     Paint_Clear(WHITE);
     
-    // Draw title
-    Paint_DrawString_EN(10, 2, "SD Card Files", &Font24, BLACK, WHITE);
+    // Get current time
+    time_t rawtime = tal_time_get_posix();
+    struct tm *timeinfo = NULL;
     
-    // Draw file list (show 10 files per screen)
-    int start_idx = (g_reader_ctx.browser.current_index / 10) * 10;
-    int y_pos = 40;
+    // Draw title and time at top
+    char title_info[80];
+    if (rawtime > 0) {
+        timeinfo = localtime(&rawtime);
+        if (timeinfo) {
+            snprintf(title_info, sizeof(title_info), "SD Card %04d-%02d-%02d %02d:%02d", 
+                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+                     timeinfo->tm_hour, timeinfo->tm_min);
+        } else {
+            snprintf(title_info, sizeof(title_info), "SD Card Files");
+        }
+    } else {
+        snprintf(title_info, sizeof(title_info), "SD Card Files");
+    }
+    Paint_DrawString_EN(10, 2, title_info, &Font20, BLACK, WHITE);
     
-    for (int i = start_idx; i < g_reader_ctx.browser.file_count && i < start_idx + 10; i++) {
+    // Draw "贾" character at top left corner (GBK: 0xBCD6)
+    draw_gbk_char24(450, 2, 0xBC, 0xD6, BLACK, WHITE);
+    
+    // Calculate how many files can fit on screen
+    // Screen height: 800px (with ROTATE_90, logical height is 800)
+    // Title: 24px, Bottom info: 20px, Margins: 10px
+    // Available: 800 - 24 - 20 - 10 = 746px
+    // Each file line: 32px (Font24 height + spacing)
+    // Max files per screen: 746 / 32 = 23 files
+    #define FILES_PER_SCREEN 23
+    #define FILE_LINE_HEIGHT 32
+    
+    int start_idx = (g_reader_ctx.browser.current_index / FILES_PER_SCREEN) * FILES_PER_SCREEN;
+    int y_pos = 30;  // Start after title
+    
+    for (int i = start_idx; i < g_reader_ctx.browser.file_count && i < start_idx + FILES_PER_SCREEN; i++) {
         char line[150];
         const char *type_str = "";
         
@@ -913,20 +941,20 @@ static void display_file_browser(void)
         
         // Highlight current selection
         if (i == g_reader_ctx.browser.current_index) {
-            Paint_DrawRectangle(5, y_pos - 2, 470, y_pos + 22, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
-            Paint_DrawString_EN(10, y_pos, line, &Font20, WHITE, BLACK);
+            Paint_DrawRectangle(5, y_pos - 2, 470, y_pos + 26, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+            Paint_DrawString_EN(10, y_pos, line, &Font24, WHITE, BLACK);
         } else {
-            Paint_DrawString_EN(10, y_pos, line, &Font20, BLACK, WHITE);
+            Paint_DrawString_EN(10, y_pos, line, &Font24, BLACK, WHITE);
         }
         
-        y_pos += 24;
+        y_pos += FILE_LINE_HEIGHT;
     }
     
     // Draw instructions at bottom
     char info[100];
     snprintf(info, sizeof(info), "File %d/%d - Short:Next Long:Open", 
              g_reader_ctx.browser.current_index + 1, g_reader_ctx.browser.file_count);
-    Paint_DrawString_EN(10, 450, info, &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(10, 775, info, &Font20, BLACK, WHITE);
     
     EPD_4in26_Display(g_image_buffer);
 }
@@ -1209,6 +1237,18 @@ void EPD_network_novel_test(void)
             PR_NOTICE("Found %d files on SD card, using SD card mode", g_reader_ctx.browser.file_count);
             g_reader_ctx.mode = MODE_FILE_BROWSER;
             g_reader_ctx.content_loaded = 1;
+            
+            // Try to sync time from network (non-blocking)
+            PR_NOTICE("Attempting to sync time from network...");
+            Paint_Clear(WHITE);
+            Paint_DrawString_EN(120, 300, "Syncing time...", &Font24, BLACK, WHITE);
+            EPD_4in26_Display_Fast(g_image_buffer);
+            
+            if (init_network() == OPRT_OK) {
+                PR_NOTICE("Time synced successfully");
+            } else {
+                PR_WARN("Time sync failed, will use system time");
+            }
             
             // Initialize button
             if (init_button() != OPRT_OK) {
