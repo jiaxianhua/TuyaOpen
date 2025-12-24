@@ -106,21 +106,29 @@ public class TuyaConverter {
         int origHeight = originalImage.getHeight();
         System.out.println("Original size: " + origWidth + "x" + origHeight);
         
+        // Ensure output is portrait orientation
+        int[] portraitSize = ensurePortraitOrientation(targetWidth, targetHeight);
+        int portraitWidth = portraitSize[0];
+        int portraitHeight = portraitSize[1];
+        
+        if (portraitWidth != targetWidth || portraitHeight != targetHeight) {
+            System.out.println("→ Adjusted to portrait orientation: " + portraitWidth + "x" + portraitHeight);
+        }
+        
         // Smart rotation: choose orientation that shows more content
-        boolean shouldRotate = shouldRotateImage(origWidth, origHeight, targetWidth, targetHeight);
+        boolean shouldRotate = shouldRotateImage(origWidth, origHeight, portraitWidth, portraitHeight);
         
         if (shouldRotate) {
             System.out.println("→ Rotating 90° for better fit");
             originalImage = rotateImage90(originalImage);
-            // Swap target dimensions
-            int temp = targetWidth;
-            targetWidth = targetHeight;
-            targetHeight = temp;
-            System.out.println("→ New target size: " + targetWidth + "x" + targetHeight);
+            // Swap dimensions after rotation
+            int temp = origWidth;
+            origWidth = origHeight;
+            origHeight = temp;
         }
         
-        // Resize image
-        BufferedImage resizedImage = resizeImage(originalImage, targetWidth, targetHeight);
+        // Resize image to final portrait dimensions
+        BufferedImage resizedImage = resizeImage(originalImage, portraitWidth, portraitHeight);
         
         // Convert to grayscale
         BufferedImage grayImage = convertToGrayscale(resizedImage);
@@ -137,6 +145,19 @@ public class TuyaConverter {
         
         System.out.println("✓ Image converted successfully");
         System.out.println("Output: " + outputFile.getAbsolutePath());
+    }
+    
+    /**
+     * Ensure the output dimensions are in portrait orientation (height > width)
+     * If the input dimensions are in landscape, swap them to make them portrait
+     */
+    private static int[] ensurePortraitOrientation(int width, int height) {
+        // If width > height (landscape), swap to make it portrait
+        if (width > height) {
+            return new int[]{height, width};
+        }
+        // Already portrait, return as-is
+        return new int[]{width, height};
     }
     
     /**
