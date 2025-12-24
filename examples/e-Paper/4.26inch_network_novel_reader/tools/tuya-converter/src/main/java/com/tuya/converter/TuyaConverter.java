@@ -62,7 +62,7 @@ public class TuyaConverter {
                 convertText(inputFile);
             } else {
                 System.err.println("Error: Unsupported file type: " + extension);
-                System.err.println("Supported: images (jpg, jpeg, png, bmp, gif, webp) and text (txt)");
+                System.err.println("Supported: images (jpg, jpeg, png, bmp, gif, webp, heic, heif) and text (txt)");
                 System.exit(1);
             }
         } catch (Exception e) {
@@ -389,7 +389,8 @@ public class TuyaConverter {
     private static boolean isImageFile(String extension) {
         return extension.equals("jpg") || extension.equals("jpeg") || 
                extension.equals("png") || extension.equals("bmp") || 
-               extension.equals("gif") || extension.equals("webp");
+               extension.equals("gif") || extension.equals("webp") ||
+               extension.equals("heic") || extension.equals("heif");
     }
     
     private static boolean isTextFile(String extension) {
@@ -397,7 +398,7 @@ public class TuyaConverter {
     }
     
     private static void printUsage() {
-        System.out.println("Tuya E-Paper Converter v1.0.0");
+        System.out.println("Tuya E-Paper Converter v1.1.0");
         System.out.println();
         System.out.println("Features:");
         System.out.println("  ✓ Smart rotation - Auto-rotates images for maximum content display");
@@ -414,7 +415,7 @@ public class TuyaConverter {
         System.out.println("  java -jar tuya-converter.jar novel.txt");
         System.out.println();
         System.out.println("Supported formats:");
-        System.out.println("  Images: jpg, jpeg, png, bmp, gif, webp");
+        System.out.println("  Images: jpg, jpeg, png, bmp, gif, webp, heic, heif");
         System.out.println("  Text: txt");
         System.out.println();
         System.out.println("Output:");

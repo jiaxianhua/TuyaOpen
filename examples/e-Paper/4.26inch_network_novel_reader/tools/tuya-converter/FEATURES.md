@@ -10,6 +10,7 @@
 - ✅ BMP
 - ✅ GIF
 - ✅ WebP
+- ✅ HEIC/HEIF (Apple)
 
 #### 转换流程
 1. **读取图片** - 使用 Java ImageIO
@@ -47,6 +48,7 @@
 photo.jpg         -> photo_tuya.bmp
 image.png         -> image_tuya.bmp
 landscape.webp    -> landscape_tuya.bmp
+iphone.heic       -> iphone_tuya.bmp
 novel.txt         -> novel_tuya.txt
 三体.txt          -> 三体_tuya.txt
 ```

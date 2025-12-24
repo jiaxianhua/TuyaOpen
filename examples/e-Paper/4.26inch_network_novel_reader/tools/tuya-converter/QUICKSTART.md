@@ -88,6 +88,9 @@ java -jar target/tuya-converter.jar family.jpg
 
 # 横屏 (800x480)
 java -jar target/tuya-converter.jar landscape.jpg 800 480
+
+# iPhone HEIC 照片
+java -jar target/tuya-converter.jar iphone_photo.heic
 ```
 
 ### 转换小说

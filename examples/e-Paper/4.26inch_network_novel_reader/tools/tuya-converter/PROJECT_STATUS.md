@@ -36,7 +36,7 @@
 ## 🎯 实现的功能
 
 ### 图片转换功能
-- [x] 支持多种格式：JPG, PNG, BMP, GIF, WebP
+- [x] 支持多种格式：JPG, PNG, BMP, GIF, WebP, HEIC, HEIF
 - [x] 智能旋转：自动选择最佳方向
 - [x] 高质量缩放：双三次插值
 - [x] 灰度转换
@@ -44,6 +44,7 @@
 - [x] 生成 1-bit BMP
 - [x] 自定义尺寸支持
 - [x] 自动文件命名（添加 _tuya 后缀）
+- [x] Apple HEIC/HEIF 格式支持（iPhone/iPad 照片）
 
 ### 文本转换功能
 - [x] 自动编码检测（UTF-8, GBK, 系统默认）
@@ -143,6 +144,7 @@ if (content.contains("\uFFFD")) {
 - [x] 小图片 (100x100) → 放大
 - [x] 大图片 (4000x3000) → 缩小
 - [x] 不同格式 (JPG, PNG, BMP, GIF, WebP)
+- [x] Apple HEIC/HEIF 格式 (iPhone/iPad 照片)
 
 #### 文本转换
 - [x] UTF-8 编码文本
@@ -289,6 +291,12 @@ int bwValue = (grayValue > 128) ? 0xFFFFFF : 0x000000;
 
 ## 📝 更新日志
 
+### v1.1.0 (2025-12-25)
+- ✨ 新增 Apple HEIC/HEIF 格式支持
+- ✅ 支持 iPhone/iPad 照片直接转换
+- 📚 添加 HEIC_SUPPORT.md 详细文档
+- 🔧 更新所有相关文档
+
 ### v1.0.0 (2025-12-25)
 - ✨ 初始版本发布
 - ✅ 图片转 1-bit BMP
@@ -319,6 +327,6 @@ java -jar target/tuya-converter.jar your-image.jpg
 ---
 
 **项目状态**：✅ 完成
-**版本**：v1.0.0
+**版本**：v1.1.0
 **最后更新**：2025-12-25
 **维护者**：TuyaOpen Team

@@ -7,7 +7,7 @@
 
     <groupId>com.tuya</groupId>
     <artifactId>tuya-converter</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <packaging>jar</packaging>
 
     <name>Tuya E-Paper Converter</name>
@@ -21,7 +21,23 @@
     </properties>
 
     <dependencies>
-        <!-- No external dependencies needed - using Java built-in libraries -->
+        <!-- TwelveMonkeys ImageIO for HEIC/HEIF support -->
+        <dependency>
+            <groupId>com.twelvemonkeys.imageio</groupId>
+            <artifactId>imageio-core</artifactId>
+            <version>3.10.1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.twelvemonkeys.imageio</groupId>
+            <artifactId>imageio-jpeg</artifactId>
+            <version>3.10.1</version>
+        </dependency>
+        <!-- HEIF/HEIC support -->
+        <dependency>
+            <groupId>com.github.gotson</groupId>
+            <artifactId>imageio-heif</artifactId>
+            <version>1.1.0</version>
+        </dependency>
     </dependencies>
 
     <build>

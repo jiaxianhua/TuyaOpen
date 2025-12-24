@@ -79,6 +79,16 @@ java -jar target/tuya-converter.jar vacation.jpg
 # 自动旋转：是（横屏→竖屏）
 ```
 
+### 示例 1.5：转换 iPhone 照片
+
+```bash
+# 输入：iphone_photo.heic (Apple HEIC 格式)
+java -jar target/tuya-converter.jar iphone_photo.heic
+
+# 输出：iphone_photo_tuya.bmp (480x800, 1-bit)
+# 自动旋转：根据照片方向自动判断
+```
+
 ### 示例 2：转换小说
 
 ```bash

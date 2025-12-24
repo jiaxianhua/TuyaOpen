@@ -12,6 +12,7 @@ Cross-platform tool to convert images to 1-bit BMP and text files to GBK encodin
 - ✅ 支持拖拽文件（Windows/macOS/Linux）
 - ✅ 自动添加 `_tuya` 后缀
 - ✅ 跨平台（Windows/macOS/Linux）
+- ✅ **支持 Apple HEIC/HEIF 格式**（iPhone/iPad 照片）
 
 ### 智能旋转说明
 
@@ -121,6 +122,7 @@ chmod +x tuya-convert.sh
 - BMP
 - GIF
 - WebP
+- HEIC/HEIF (Apple)
 
 ### 文本 / Text
 - TXT (自动检测编码：UTF-8, GBK, 系统默认)
@@ -161,6 +163,10 @@ novel.txt         -> novel_tuya.txt (GBK encoding)
 # 默认尺寸 (480x800)
 java -jar tuya-converter.jar vacation.jpg
 # 输出: vacation_tuya.bmp
+
+# 转换 iPhone HEIC 照片
+java -jar tuya-converter.jar iphone_photo.heic
+# 输出: iphone_photo_tuya.bmp
 
 # 自定义尺寸
 java -jar tuya-converter.jar landscape.jpg 800 480
@@ -269,6 +275,11 @@ MIT License
 欢迎提交 Issue 和 Pull Request！
 
 ## 更新日志 / Changelog
+
+### v1.1.0 (2025-12-25)
+- ✨ 新增 Apple HEIC/HEIF 格式支持
+- ✅ 支持 iPhone/iPad 照片直接转换
+- 📚 添加 HEIC 支持详细文档
 
 ### v1.0.0 (2025-12-25)
 - ✨ 初始版本
