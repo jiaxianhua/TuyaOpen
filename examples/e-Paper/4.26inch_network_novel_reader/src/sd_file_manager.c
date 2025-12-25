@@ -191,6 +191,12 @@ int sd_scan_files(file_browser_t *browser)
     
     TUYA_FILEINFO info = NULL;
     while (tkl_dir_read(dir, &info) == OPRT_OK && browser->file_count < MAX_FILES) {
+        // Check if info is valid before using it
+        if (!info) {
+            PR_WARN("tkl_dir_read returned OK but info is NULL, stopping scan");
+            break;
+        }
+        
         const char *name = NULL;
         if (tkl_dir_name(info, &name) != OPRT_OK || !name) {
             continue;

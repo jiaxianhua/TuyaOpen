@@ -25,3 +25,8 @@ http://120.79.89.230:8001/files/thumbs/wallpaper.bmp
 
 摘要: 获取缩略图
 描述: 根据文件名获取缩略图
+
+GET/wallpaper/new
+
+摘要: 获取新壁纸
+描述: 从网络获取新壁纸，转换为480x800 1Bit Bitmap格式并保存
