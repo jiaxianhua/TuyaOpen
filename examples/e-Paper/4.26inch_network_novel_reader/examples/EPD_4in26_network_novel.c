@@ -40,8 +40,17 @@
 // Novel URL - CHANGE THIS TO YOUR NOVEL URL
 #define NOVEL_URL "http://120.79.89.230/fanren.txt"
 
+// Wallpaper settings
+#define WALLPAPER_URL "http://120.79.89.230:8001/files/wallpaper.bmp"
+#define WALLPAPER_HOST "120.79.89.230"
+#define WALLPAPER_PORT 8001
+#define WALLPAPER_PATH "/files/wallpaper.bmp"
+#define WALLPAPER_FILE "/sdcard/wallpaper.bmp"
+#define WALLPAPER_TIMEOUT 30000  // 30 seconds for image download
+
 // Time sync settings
 #define TIME_SERVER_URL "www.baidu.com"
+#define TIME_SERVER_PORT 80
 #define TIME_SERVER_PATH "/"
 #define HTTP_REQUEST_TIMEOUT 8000
 
@@ -194,7 +203,7 @@ static int sync_time_from_http(void)
             .cacert = NULL,
             .cacert_len = 0,
             .host = TIME_SERVER_URL,
-            .port = 80,
+            .port = TIME_SERVER_PORT,
             .method = "GET",
             .path = TIME_SERVER_PATH,
             .headers = headers,
@@ -286,6 +295,113 @@ static OPERATE_RET network_status_cb(void *data)
         g_reader_ctx.network_connected = 0;
     }
     
+    return OPRT_OK;
+}
+
+/**
+ * @brief Download wallpaper from server and save to SD card
+ */
+static int download_wallpaper(void)
+{
+    if (!g_reader_ctx.network_connected) {
+        PR_ERR("Network not connected");
+        return OPRT_COM_ERROR;
+    }
+    
+    PR_NOTICE("Downloading wallpaper from: %s", WALLPAPER_URL);
+    
+    http_client_response_t http_response = {0};
+    http_client_header_t headers[] = {
+        {.key = "User-Agent", .value = "TuyaOpen-NovelReader/1.0"}
+    };
+    
+    http_client_status_t http_status = http_client_request(
+        &(const http_client_request_t){
+            .host = WALLPAPER_HOST,
+            .port = WALLPAPER_PORT,
+            .method = "GET",
+            .path = WALLPAPER_PATH,
+            .headers = headers,
+            .headers_count = 1,
+            .body = "",
+            .body_length = 0,
+            .timeout_ms = WALLPAPER_TIMEOUT
+        },
+        &http_response
+    );
+    
+    if (http_status != HTTP_CLIENT_SUCCESS) {
+        PR_ERR("HTTP request failed: %d", http_status);
+        http_client_free(&http_response);
+        return OPRT_COM_ERROR;
+    }
+    
+    if (http_response.status_code != 200) {
+        PR_ERR("HTTP status: %d", http_response.status_code);
+        http_client_free(&http_response);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Check response size
+    int body_len = http_response.body_length;
+    if (body_len <= 0 || body_len > 10 * 1024 * 1024) {
+        PR_ERR("Invalid image size: %d", body_len);
+        http_client_free(&http_response);
+        return OPRT_COM_ERROR;
+    }
+    
+    PR_NOTICE("Downloaded %d bytes, saving to SD card...", body_len);
+    
+    // Save to SD card
+    TUYA_FILE fp = tkl_fopen(WALLPAPER_FILE, "wb");
+    if (!fp) {
+        PR_ERR("Failed to create file: %s", WALLPAPER_FILE);
+        http_client_free(&http_response);
+        return OPRT_COM_ERROR;
+    }
+    
+    int written = tkl_fwrite((void *)http_response.body, body_len, fp);
+    tkl_fclose(fp);
+    
+    if (written != body_len) {
+        PR_ERR("Failed to write file, written=%d, expected=%d", written, body_len);
+        http_client_free(&http_response);
+        return OPRT_COM_ERROR;
+    }
+    
+    PR_NOTICE("Wallpaper saved successfully: %s", WALLPAPER_FILE);
+    
+    http_client_free(&http_response);
+    return OPRT_OK;
+}
+
+/**
+ * @brief Display wallpaper if exists on SD card
+ * @return OPRT_OK if wallpaper displayed, error otherwise
+ */
+static int display_wallpaper(void)
+{
+    // Check if wallpaper exists
+    BOOL_T exists = FALSE;
+    if (tkl_fs_is_exist(WALLPAPER_FILE, &exists) != OPRT_OK || !exists) {
+        PR_DEBUG("Wallpaper file not found: %s", WALLPAPER_FILE);
+        return OPRT_COM_ERROR;
+    }
+    
+    PR_NOTICE("Displaying wallpaper: %s", WALLPAPER_FILE);
+    
+    Paint_Clear(WHITE);
+    
+    // Display the BMP image
+    int rt = sd_display_bmp_image(WALLPAPER_FILE);
+    if (rt != OPRT_OK) {
+        PR_ERR("Failed to display wallpaper");
+        return rt;
+    }
+    
+    EPD_4in26_Display(g_image_buffer);
+    
+    PR_NOTICE("Wallpaper displayed successfully");
     return OPRT_OK;
 }
 
@@ -1238,6 +1354,14 @@ void EPD_network_novel_test(void)
             g_reader_ctx.mode = MODE_FILE_BROWSER;
             g_reader_ctx.content_loaded = 1;
             
+            // Try to display wallpaper first
+            if (display_wallpaper() == OPRT_OK) {
+                PR_NOTICE("Wallpaper displayed, waiting 3 seconds...");
+                tal_system_sleep(3000);  // Show wallpaper for 3 seconds
+            } else {
+                PR_NOTICE("No wallpaper found, will download after time sync");
+            }
+            
             // Try to sync time from network (non-blocking)
             PR_NOTICE("Attempting to sync time from network...");
             Paint_Clear(WHITE);
@@ -1246,6 +1370,34 @@ void EPD_network_novel_test(void)
             
             if (init_network() == OPRT_OK) {
                 PR_NOTICE("Time synced successfully");
+                
+                // Download wallpaper if not exists or check fails
+                BOOL_T wallpaper_exists = FALSE;
+                int check_result = tkl_fs_is_exist(WALLPAPER_FILE, &wallpaper_exists);
+                
+                // Download if: check failed OR file doesn't exist
+                if (check_result != OPRT_OK || !wallpaper_exists) {
+                    if (check_result != OPRT_OK) {
+                        PR_NOTICE("Wallpaper check failed, will download");
+                    } else {
+                        PR_NOTICE("Wallpaper not found, will download");
+                    }
+                    
+                    PR_NOTICE("Downloading wallpaper...");
+                    Paint_Clear(WHITE);
+                    Paint_DrawString_EN(100, 300, "Downloading wallpaper...", &Font24, BLACK, WHITE);
+                    EPD_4in26_Display_Fast(g_image_buffer);
+                    
+                    if (download_wallpaper() == OPRT_OK) {
+                        PR_NOTICE("Wallpaper downloaded, displaying...");
+                        display_wallpaper();
+                        tal_system_sleep(3000);  // Show wallpaper for 3 seconds
+                    } else {
+                        PR_WARN("Failed to download wallpaper");
+                    }
+                } else {
+                    PR_NOTICE("Wallpaper already exists, skipping download");
+                }
             } else {
                 PR_WARN("Time sync failed, will use system time");
             }
