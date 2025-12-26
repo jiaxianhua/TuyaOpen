@@ -429,15 +429,15 @@ static int download_wallpaper(void)
     PR_NOTICE("Downloaded %d bytes, saving to SD card...", body_len);
     
     // Save to SD card
-    TUYA_FILE fp = tal_fopen(WALLPAPER_FILE, "wb");
+    TUYA_FILE fp = tkl_fopen(WALLPAPER_FILE, "wb");
     if (!fp) {
         PR_ERR("Failed to create file: %s", WALLPAPER_FILE);
         http_client_free(&http_response);
         return OPRT_COM_ERROR;
     }
     
-    int written = tal_fwrite((void *)http_response.body, body_len, fp);
-    tal_fclose(fp);
+    int written = tkl_fwrite((void *)http_response.body, body_len, fp);
+    tkl_fclose(fp);
     
     if (written != body_len) {
         PR_ERR("Failed to write file, written=%d, expected=%d", written, body_len);
@@ -1044,38 +1044,37 @@ static int load_and_draw_thumbnail(network_file_info_t *file, int thumb_x, int t
     
     // Save to temporary file
     if (http_response.body && http_response.body_length > 0) {
-        TUYA_FILE fp = tal_fopen(temp_file, "wb");
+        TUYA_FILE fp = tkl_fopen(temp_file, "wb");
         if (!fp) {
             PR_ERR("Failed to create temp file: %s", temp_file);
             http_client_free(&http_response);
             return OPRT_COM_ERROR;
         }
         
-        int written = tal_fwrite((void *)http_response.body, http_response.body_length, fp);
-        tal_fclose(fp);
+        int written = tkl_fwrite((void *)http_response.body, http_response.body_length, fp);
+        tkl_fclose(fp);
         
         if (written != http_response.body_length) {
             PR_ERR("Failed to write temp file");
-            tal_fs_remove(temp_file);
+            tkl_fs_remove(temp_file);
             http_client_free(&http_response);
             return OPRT_COM_ERROR;
         }
         
         PR_DEBUG("Saved thumbnail to: %s (%d bytes)", temp_file, written);
         
-        // Draw the BMP file directly using GUI_ReadBmp
-        // Note: GUI_ReadBmp expects standard FILE* operations, so we use the existing function
-        // that handles BMP format correctly
-        UBYTE result = GUI_ReadBmp(temp_file, thumb_x, thumb_y);
+        // Draw the BMP file using sd_display_bmp_image_at which uses tkl_fopen
+        // and supports positioning. GUI_ReadBmp uses standard fopen() which doesn't work with SD card
+        int result = sd_display_bmp_image_at(temp_file, thumb_x, thumb_y);
         
         // Clean up temp file
-        tal_fs_remove(temp_file);
+        tkl_fs_remove(temp_file);
         
-        if (result == 0) {
+        if (result == OPRT_OK) {
             file->thumbnail_loaded = 1;
-            PR_NOTICE("Thumbnail loaded and drawn successfully");
+            PR_NOTICE("Thumbnail loaded and drawn successfully at (%d,%d)", thumb_x, thumb_y);
         } else {
-            PR_ERR("Failed to draw BMP thumbnail");
+            PR_ERR("Failed to draw BMP thumbnail: %d", result);
             http_client_free(&http_response);
             return OPRT_COM_ERROR;
         }
@@ -1229,7 +1228,7 @@ static int download_file_with_progress(network_file_info_t *file)
     }
     
     // Open file for writing
-    TUYA_FILE fp = tal_fopen(save_path, "wb");
+    TUYA_FILE fp = tkl_fopen(save_path, "wb");
     if (fp == NULL) {
         PR_ERR("Failed to create file: %s", save_path);
         return OPRT_FILE_OPEN_FAILED;
@@ -1239,8 +1238,8 @@ static int download_file_with_progress(network_file_info_t *file)
     char path[256];
     if (parse_url_path(file->url, path, sizeof(path)) != OPRT_OK) {
         PR_ERR("Failed to parse file URL");
-        tal_fclose(fp);
-        tal_fs_remove(save_path);
+        tkl_fclose(fp);
+        tkl_fs_remove(save_path);
         return OPRT_COM_ERROR;
     }
     
@@ -1267,8 +1266,8 @@ static int download_file_with_progress(network_file_info_t *file)
     
     if (http_status != HTTP_CLIENT_SUCCESS || http_response.status_code != 200) {
         PR_ERR("Failed to start download: %d, status: %d", http_status, http_response.status_code);
-        tal_fclose(fp);
-        tal_fs_remove(save_path);
+        tkl_fclose(fp);
+        tkl_fs_remove(save_path);
         http_client_free(&http_response);
         return OPRT_COM_ERROR;
     }
@@ -1278,11 +1277,11 @@ static int download_file_with_progress(network_file_info_t *file)
     int total = file->size;
     
     if (http_response.body && http_response.body_length > 0) {
-        int written = tal_fwrite((void *)http_response.body, http_response.body_length, fp);
+        int written = tkl_fwrite((void *)http_response.body, http_response.body_length, fp);
         if (written != http_response.body_length) {
             PR_ERR("Failed to write file");
-            tal_fclose(fp);
-            tal_fs_remove(save_path);
+            tkl_fclose(fp);
+            tkl_fs_remove(save_path);
             http_client_free(&http_response);
             return OPRT_FILE_WRITE_FAILED;
         }
@@ -1293,7 +1292,7 @@ static int download_file_with_progress(network_file_info_t *file)
     }
     
     http_client_free(&http_response);
-    tal_fclose(fp);
+    tkl_fclose(fp);
     
     PR_NOTICE("Download completed: %s", save_path);
     
@@ -2396,6 +2395,13 @@ void EPD_network_novel_test(void)
         PR_NOTICE("SD card initialized and mounted");
         g_reader_ctx.sd_available = 1;
         
+        // TEMPORARY FIX: Skip file scanning due to crash in tkl_dir_read
+        // The SD card is mounted and available for network mode thumbnails
+        // TODO: Fix tkl_dir_read crash and re-enable file scanning
+        PR_NOTICE("SD card mounted, skipping file scan (using network mode)");
+        
+        // Commented out to avoid crash:
+        /*
         // Create sample files if needed
         // sd_create_sample_files();
         
@@ -2467,6 +2473,7 @@ void EPD_network_novel_test(void)
             PR_NOTICE("SD card mounted but no files found, will use network mode");
             // Keep SD card mounted (sd_available = 1) for network mode thumbnails
         }
+        */
     } else {
         PR_WARN("SD card initialization failed");
         g_reader_ctx.sd_available = 0;

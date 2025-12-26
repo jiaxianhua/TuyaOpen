@@ -109,4 +109,13 @@ int sd_get_page_count(const char *filepath, int page_size);
  */
 int sd_display_bmp_image(const char *filepath);
 
+/**
+ * @brief Display BMP image at specific position on e-paper
+ * @param filepath Full file path
+ * @param x_offset X position offset
+ * @param y_offset Y position offset
+ * @return OPRT_OK on success
+ */
+int sd_display_bmp_image_at(const char *filepath, int x_offset, int y_offset);
+
 #endif /* _SD_FILE_MANAGER_H_ */
