@@ -201,6 +201,7 @@ static void draw_gbk_char(int x, int y, unsigned char gb_high, unsigned char gb_
                           UWORD fg_color, UWORD bg_color);
 static void draw_gbk_char24(int x, int y, unsigned char gb_high, unsigned char gb_low, 
                             UWORD fg_color, UWORD bg_color);
+static int load_and_draw_thumbnail(network_file_info_t *file, int thumb_x, int thumb_y);
 
 /**
  * @brief Parse HTTP Date header and set system time
@@ -795,22 +796,16 @@ static void render_grid_cell(network_file_info_t *file, grid_cell_t *cell, int s
     int thumb_x = cell->x + (cell->width - THUMBNAIL_SIZE) / 2;
     int thumb_y = cell->y + 5;
     
-    // Draw thumbnail if loaded
-    if (file->thumbnail_loaded && file->thumbnail_data) {
-        // Draw thumbnail (120x120 bitmap)
-        for (int y = 0; y < THUMBNAIL_SIZE; y++) {
-            for (int x = 0; x < THUMBNAIL_SIZE; x++) {
-                int byte_idx = (y * THUMBNAIL_SIZE + x) / 8;
-                int bit_idx = 7 - ((y * THUMBNAIL_SIZE + x) % 8);
-                UWORD color = (file->thumbnail_data[byte_idx] & (1 << bit_idx)) ? BLACK : WHITE;
-                Paint_SetPixel(thumb_x + x, thumb_y + y, color);
-            }
-        }
-    } else {
-        // Draw placeholder
+    // Load and draw thumbnail (BMP file will be parsed correctly)
+    if (!file->thumbnail_loaded) {
+        load_and_draw_thumbnail(file, thumb_x, thumb_y);
+    }
+    
+    // If thumbnail failed to load, draw placeholder
+    if (!file->thumbnail_loaded) {
         Paint_DrawRectangle(thumb_x, thumb_y, thumb_x + THUMBNAIL_SIZE - 1, 
                            thumb_y + THUMBNAIL_SIZE - 1, GRAY2, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
-        Paint_DrawString_EN(thumb_x + 30, thumb_y + 50, "Loading", &Font16, BLACK, WHITE);
+        Paint_DrawString_EN(thumb_x + 30, thumb_y + 50, "No Image", &Font16, BLACK, WHITE);
     }
     
     // Draw filename (2 lines max, GBK encoded)
@@ -969,8 +964,11 @@ static int parse_url_path(const char *url, char *path, int path_size)
             return OPRT_OK;
         }
         
-        // Copy path (p-1 points to the character after the third slash)
-        snprintf(path, path_size, "/%s", p - 1);
+        // p now points to the character after the third slash
+        // p-1 points to the third slash itself
+        // Copy from p-1 to include the leading slash
+        strncpy(path, p - 1, path_size - 1);
+        path[path_size - 1] = '\0';
         return OPRT_OK;
     }
     
@@ -982,38 +980,46 @@ static int parse_url_path(const char *url, char *path, int path_size)
 /**
  * @brief Load thumbnail for a single file
  * @param[in,out] file File information
+ * @param[in] thumb_x X position to draw thumbnail
+ * @param[in] thumb_y Y position to draw thumbnail
  * @return OPRT_OK on success, error code otherwise
  */
-static int load_thumbnail(network_file_info_t *file)
+static int load_and_draw_thumbnail(network_file_info_t *file, int thumb_x, int thumb_y)
 {
-    if (!file || file->thumbnail_loaded) {
+    if (!file) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    // If already loaded and drawn, skip
+    if (file->thumbnail_loaded) {
         return OPRT_OK;
     }
     
     PR_NOTICE("Loading thumbnail: %s", file->thumbnail_url);
     
-    // Allocate memory for thumbnail (120x120 = 14400 pixels = 1800 bytes)
-    int thumb_size = (THUMBNAIL_SIZE * THUMBNAIL_SIZE) / 8;
-    file->thumbnail_data = (UBYTE *)tal_malloc(thumb_size);
-    if (!file->thumbnail_data) {
-        PR_ERR("Failed to allocate thumbnail memory");
-        return OPRT_MALLOC_FAILED;
-    }
-    
     // Parse URL path
     char path[256];
     if (parse_url_path(file->thumbnail_url, path, sizeof(path)) != OPRT_OK) {
         PR_ERR("Failed to parse thumbnail URL");
-        tal_free(file->thumbnail_data);
-        file->thumbnail_data = NULL;
         return OPRT_COM_ERROR;
     }
     
-    // Download thumbnail
+    // Download thumbnail to temporary file
+    // Use SD card if available, otherwise skip (network mode without SD card)
+    if (!g_reader_ctx.sd_available) {
+        PR_WARN("SD card not available, cannot save thumbnail temp file");
+        return OPRT_COM_ERROR;
+    }
+    
+    char temp_file[128];
+    snprintf(temp_file, sizeof(temp_file), "/sdcard/thumb_%s", file->filename);
+    
     http_client_response_t http_response = {0};
     http_client_header_t headers[] = {
         {.key = "User-Agent", .value = "TuyaOpen-NovelReader/1.0"}
     };
+    
+    PR_DEBUG("Downloading thumbnail from %s:%d%s", FILE_SERVER_HOST, FILE_SERVER_PORT, path);
     
     http_client_status_t http_status = http_client_request(
         &(const http_client_request_t){
@@ -1032,27 +1038,55 @@ static int load_thumbnail(network_file_info_t *file)
     
     if (http_status != HTTP_CLIENT_SUCCESS || http_response.status_code != 200) {
         PR_ERR("Failed to download thumbnail: %d, status: %d", http_status, http_response.status_code);
-        tal_free(file->thumbnail_data);
-        file->thumbnail_data = NULL;
         http_client_free(&http_response);
         return OPRT_COM_ERROR;
     }
     
-    // Copy thumbnail data
+    // Save to temporary file
     if (http_response.body && http_response.body_length > 0) {
-        int copy_size = (http_response.body_length < thumb_size) ? http_response.body_length : thumb_size;
-        memcpy(file->thumbnail_data, http_response.body, copy_size);
-        file->thumbnail_loaded = 1;
+        TUYA_FILE fp = tal_fopen(temp_file, "wb");
+        if (!fp) {
+            PR_ERR("Failed to create temp file: %s", temp_file);
+            http_client_free(&http_response);
+            return OPRT_COM_ERROR;
+        }
+        
+        int written = tal_fwrite((void *)http_response.body, http_response.body_length, fp);
+        tal_fclose(fp);
+        
+        if (written != http_response.body_length) {
+            PR_ERR("Failed to write temp file");
+            tal_fs_remove(temp_file);
+            http_client_free(&http_response);
+            return OPRT_COM_ERROR;
+        }
+        
+        PR_DEBUG("Saved thumbnail to: %s (%d bytes)", temp_file, written);
+        
+        // Draw the BMP file directly using GUI_ReadBmp
+        // Note: GUI_ReadBmp expects standard FILE* operations, so we use the existing function
+        // that handles BMP format correctly
+        UBYTE result = GUI_ReadBmp(temp_file, thumb_x, thumb_y);
+        
+        // Clean up temp file
+        tal_fs_remove(temp_file);
+        
+        if (result == 0) {
+            file->thumbnail_loaded = 1;
+            PR_NOTICE("Thumbnail loaded and drawn successfully");
+        } else {
+            PR_ERR("Failed to draw BMP thumbnail");
+            http_client_free(&http_response);
+            return OPRT_COM_ERROR;
+        }
     }
     
     http_client_free(&http_response);
-    PR_NOTICE("Thumbnail loaded successfully");
-    
     return OPRT_OK;
 }
 
 /**
- * @brief Load thumbnails for current page
+ * @brief Load thumbnails for current page (now just a placeholder, thumbnails load on-demand)
  * @param[in,out] browser Network file browser context
  * @return OPRT_OK on success, error code otherwise
  */
@@ -1062,28 +1096,15 @@ static int load_page_thumbnails(network_file_browser_t *browser)
         return OPRT_INVALID_PARM;
     }
     
-    int start_idx = browser->current_page * (GRID_ROWS * GRID_COLS);
-    int end_idx = start_idx + (GRID_ROWS * GRID_COLS);
-    if (end_idx > browser->file_count) {
-        end_idx = browser->file_count;
-    }
-    
-    PR_NOTICE("Loading thumbnails for page %d (files %d-%d)", 
-              browser->current_page, start_idx, end_idx - 1);
-    
-    for (int i = start_idx; i < end_idx; i++) {
-        if (!browser->files[i].thumbnail_loaded) {
-            load_thumbnail(&browser->files[i]);
-            // Small delay to avoid overwhelming the server
-            tal_system_sleep(100);
-        }
-    }
+    // Thumbnails are now loaded on-demand during rendering
+    // This function is kept for compatibility but does nothing
+    PR_NOTICE("Thumbnails will be loaded on-demand during rendering");
     
     return OPRT_OK;
 }
 
 /**
- * @brief Free thumbnails for a specific page
+ * @brief Free thumbnails for a specific page (now just resets loaded flags)
  * @param[in,out] browser Network file browser context
  * @param[in] page Page number
  */
@@ -1099,14 +1120,12 @@ static void free_page_thumbnails(network_file_browser_t *browser, int page)
         end_idx = browser->file_count;
     }
     
-    PR_NOTICE("Freeing thumbnails for page %d", page);
+    PR_NOTICE("Resetting thumbnail flags for page %d", page);
     
+    // Just reset the loaded flags - no memory to free since thumbnails
+    // are loaded on-demand and drawn directly from BMP files
     for (int i = start_idx; i < end_idx; i++) {
-        if (browser->files[i].thumbnail_data) {
-            tal_free(browser->files[i].thumbnail_data);
-            browser->files[i].thumbnail_data = NULL;
-            browser->files[i].thumbnail_loaded = 0;
-        }
+        browser->files[i].thumbnail_loaded = 0;
     }
 }
 
@@ -1199,7 +1218,8 @@ static int download_file_with_progress(network_file_info_t *file)
     snprintf(save_path, sizeof(save_path), "/sdcard/%s", file->filename);
     
     // Check if file already exists
-    if (tkl_fs_is_exist(save_path) == OPRT_OK) {
+    BOOL_T file_exists = FALSE;
+    if (tal_fs_is_exist(save_path, &file_exists) == OPRT_OK && file_exists) {
         PR_WARN("File already exists: %s", save_path);
         Paint_Clear(WHITE);
         Paint_DrawString_EN(100, 200, "File already exists!", &Font24, BLACK, WHITE);
@@ -1300,8 +1320,8 @@ static int mode_manager_init(mode_manager_t *mgr)
     // Check network availability
     mgr->network_available = g_reader_ctx.network_connected ? 1 : 0;
     
-    // Check SD card availability
-    mgr->sd_available = (tkl_fs_is_exist("/sdcard") == OPRT_OK) ? 1 : 0;
+    // Check SD card availability (use global flag set during initialization)
+    mgr->sd_available = g_reader_ctx.sd_available;
     
     // Choose default mode
     if (mgr->network_available) {
@@ -2365,21 +2385,19 @@ void EPD_network_novel_test(void)
     Paint_SelectImage(g_image_buffer);
     Paint_Clear(WHITE);
     
-    // TEMPORARILY DISABLED: Skip SD card to test network functionality only
     // Priority 1: Try SD card first
-    PR_NOTICE("Skipping SD card check (testing network only)...");
-    Paint_DrawString_EN(100, 300, "Network mode (SD disabled)", &Font24, BLACK, WHITE);
+    PR_NOTICE("Checking SD card...");
+    Paint_DrawString_EN(100, 300, "Checking SD card...", &Font24, BLACK, WHITE);
     EPD_4in26_Display(g_image_buffer);
     
-    g_reader_ctx.sd_available = 0;
-    
-    /* COMMENTED OUT FOR NETWORK TESTING - SD card initialization disabled
-    if (sd_card_init() == OPRT_OK) {
-        PR_NOTICE("SD card initialized");
+    // Try to initialize SD card (keep it mounted even if no files for network mode thumbnails)
+    int sd_init_result = sd_card_init();
+    if (sd_init_result == OPRT_OK) {
+        PR_NOTICE("SD card initialized and mounted");
         g_reader_ctx.sd_available = 1;
         
         // Create sample files if needed
-        sd_create_sample_files();
+        // sd_create_sample_files();
         
         // Scan files
         if (sd_scan_files(&g_reader_ctx.browser) == OPRT_OK && g_reader_ctx.browser.file_count > 0) {
@@ -2406,7 +2424,7 @@ void EPD_network_novel_test(void)
                 
                 // Download wallpaper if not exists or check fails
                 BOOL_T wallpaper_exists = FALSE;
-                int check_result = tkl_fs_is_exist(WALLPAPER_FILE, &wallpaper_exists);
+                int check_result = tal_fs_is_exist(WALLPAPER_FILE, &wallpaper_exists);
                 
                 // Download if: check failed OR file doesn't exist
                 if (check_result != OPRT_OK || !wallpaper_exists) {
@@ -2446,12 +2464,13 @@ void EPD_network_novel_test(void)
             // Enter main loop
             goto main_loop;
         } else {
-            PR_WARN("No supported files found on SD card");
+            PR_NOTICE("SD card mounted but no files found, will use network mode");
+            // Keep SD card mounted (sd_available = 1) for network mode thumbnails
         }
     } else {
-        PR_WARN("SD card not available");
+        PR_WARN("SD card initialization failed");
+        g_reader_ctx.sd_available = 0;
     }
-    END OF SD CARD COMMENT BLOCK */
     
     // Priority 2: Try network if SD card not available or empty
     PR_NOTICE("Trying network mode...");
