@@ -9,6 +9,9 @@
 #include "tkl_output.h"
 #include "tkl_fs.h"
 #include "utf8_to_gbk.h"
+#include "EPD_4in26.h"
+#include "GUI_Paint.h"
+#include "DEV_Config.h"
 
 #if defined(EBABLE_EXAMPLE_SD_PINMUX) && (EBABLE_EXAMPLE_SD_PINMUX == 1)
 #include "tkl_pinmux.h"
@@ -40,6 +43,93 @@ static char sg_read_buf[128] = {0};
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+static void display_file_list_on_epaper(void)
+{
+    PR_NOTICE("Initializing E-Paper...");
+    if(DEV_Module_Init() != 0) {
+        PR_ERR("E-Paper DEV_Module_Init failed");
+        return;
+    }
+
+    EPD_4in26_Init();
+    EPD_4in26_Clear();
+    DEV_Delay_ms(500);
+
+    // Allocate memory for image
+    UBYTE *BlackImage;
+    UDOUBLE Imagesize = ((EPD_4in26_WIDTH % 8 == 0)? (EPD_4in26_WIDTH / 8 ): (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT;
+    
+    if((BlackImage = (UBYTE *)tal_malloc(Imagesize)) == NULL) {
+        PR_ERR("Failed to allocate memory for E-Paper image...");
+        return;
+    }
+    
+    PR_NOTICE("Drawing file list to buffer...");
+    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, 0, WHITE);
+    Paint_SelectImage(BlackImage);
+    Paint_Clear(WHITE);
+
+    // Draw Title
+    Paint_DrawString_EN(10, 10, "SD Card Files:", &Font24, BLACK, WHITE);
+    Paint_DrawLine(10, 35, 790, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+
+    // List files
+    TUYA_DIR dir_hdl = NULL;
+    if (tkl_dir_open(SDCARD_MOUNT_PATH, &dir_hdl) == OPRT_OK) {
+        TUYA_FILEINFO file_info = {0};
+        int y_pos = 45;
+        int file_count = 0;
+        
+        while (tkl_dir_read(dir_hdl, &file_info) == OPRT_OK) {
+            char *name = NULL;
+            if (tkl_dir_name(file_info, (const char**)&name) == OPRT_OK) {
+                // Determine if ASCII or needs GBK handling
+                int is_ascii = 1;
+                for(int i=0; name[i]; i++) {
+                    if((unsigned char)name[i] >= 0x80) {
+                        is_ascii = 0;
+                        break;
+                    }
+                }
+
+                if(is_ascii) {
+                    Paint_DrawString_EN(10, y_pos, name, &Font24, WHITE, BLACK);
+                } else {
+                    // Assuming name is GBK (from FAT32 default)
+                    // If Font24CN supports it, it will display. 
+                    // Note: Font24CN in library usually only has limited characters.
+                    Paint_DrawString_CN(10, y_pos, name, &Font24CN, WHITE, BLACK);
+                }
+                
+                y_pos += 30;
+                file_count++;
+                
+                // Check bounds
+                if (y_pos > EPD_4in26_HEIGHT - 30) {
+                    Paint_DrawString_EN(10, y_pos, "... more files ...", &Font24, BLACK, WHITE);
+                    break;
+                }
+            }
+        }
+        tkl_dir_close(dir_hdl);
+        
+        if (file_count == 0) {
+            Paint_DrawString_EN(10, 50, "No files found!", &Font24, BLACK, WHITE);
+        }
+    } else {
+        Paint_DrawString_EN(10, 50, "Failed to open dir!", &Font24, BLACK, WHITE);
+    }
+
+    PR_NOTICE("Updating E-Paper display...");
+    EPD_4in26_Display(BlackImage);
+    DEV_Delay_ms(2000);
+    
+    // Cleanup
+    EPD_4in26_Sleep();
+    tal_free(BlackImage);
+    // DEV_Module_Exit(); // Keep initialized if we want to update again, or exit to save power
+}
+
 static void __example_sd_chinese_test(void)
 {
     PR_NOTICE("Starting Chinese filename test...");
@@ -124,6 +214,9 @@ static void __example_sd_chinese_test(void)
     }
     tkl_dir_close(dir_hdl);
     PR_NOTICE("Chinese filename test finished.");
+
+    // 3. Display file list on E-Paper
+    display_file_list_on_epaper();
 }
 
 static void __example_sd_test(void)

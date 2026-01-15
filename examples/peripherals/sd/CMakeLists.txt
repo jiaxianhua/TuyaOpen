@@ -17,6 +17,19 @@ list(APPEND APP_SRCS
     ${CMAKE_SOURCE_DIR}/apps/tuya_t5_pocket/tuya_t5_pocket_ai/src/expand/src/utf8_to_gbk.c
 )
 
+# Add E-Paper Library sources
+aux_source_directory(${APP_PATH}/lib/Config LIB_CONFIG_SRCS)
+aux_source_directory(${APP_PATH}/lib/e-Paper LIB_EPAPER_SRCS)
+aux_source_directory(${APP_PATH}/lib/GUI LIB_GUI_SRCS)
+aux_source_directory(${APP_PATH}/lib/Fonts LIB_FONTS_SRCS)
+
+list(APPEND APP_SRCS 
+    ${LIB_CONFIG_SRCS}
+    ${LIB_EPAPER_SRCS}
+    ${LIB_GUI_SRCS}
+    ${LIB_FONTS_SRCS}
+)
+
 ########################################
 # Target Configure
 ########################################
@@ -25,6 +38,10 @@ add_library(${EXAMPLE_LIB})
 target_include_directories(${EXAMPLE_LIB}
     PRIVATE
         ${CMAKE_SOURCE_DIR}/apps/tuya_t5_pocket/tuya_t5_pocket_ai/src/expand/inc
+        ${APP_PATH}/lib/Config
+        ${APP_PATH}/lib/e-Paper
+        ${APP_PATH}/lib/GUI
+        ${APP_PATH}/lib/Fonts
 )
 
 target_sources(${EXAMPLE_LIB}
