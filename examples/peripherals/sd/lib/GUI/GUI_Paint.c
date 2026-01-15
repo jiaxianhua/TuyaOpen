@@ -232,7 +232,7 @@ void Paint_SetPixel(UWORD Xpoint, UWORD Ypoint, UWORD Color)
         return;
     }
 
-    if(X > Paint.WidthMemory || Y > Paint.HeightMemory){
+    if(X >= Paint.WidthMemory || Y >= Paint.HeightMemory){
         Debug("Exceeding display boundaries\r\n");
         return;
     }

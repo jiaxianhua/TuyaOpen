@@ -106,7 +106,8 @@ static void display_file_list_on_epaper(void)
 
     // Allocate memory for image
     UBYTE *BlackImage;
-    UDOUBLE Imagesize = ((EPD_4in26_WIDTH % 8 == 0)? (EPD_4in26_WIDTH / 8 ): (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT;
+    // Add extra buffer safety margin to prevent heap overflow
+    UDOUBLE Imagesize = ((EPD_4in26_WIDTH % 8 == 0)? (EPD_4in26_WIDTH / 8 ): (EPD_4in26_WIDTH / 8 + 1)) * EPD_4in26_HEIGHT + 256;
     
     if((BlackImage = (UBYTE *)tal_malloc(Imagesize)) == NULL) {
         PR_ERR("Failed to allocate memory for E-Paper image...");
