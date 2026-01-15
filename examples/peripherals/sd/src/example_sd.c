@@ -23,7 +23,7 @@
 ************************macro define************************
 ***********************************************************/
 #define TASK_SD_PRIORITY THREAD_PRIO_2
-#define TASK_SD_SIZE     4096
+#define TASK_SD_SIZE     (1024 * 16)
 
 #define SDCARD_MOUNT_PATH "/sdcard"
 #define RANDOM_FILE_PATH  "/sdcard/random.txt"
@@ -43,6 +43,55 @@ static char sg_read_buf[128] = {0};
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+static void Paint_DrawString_CN_HZK24(UWORD Xstart, UWORD Ystart, const char * pString, UWORD Color_Foreground, UWORD Color_Background)
+{
+    // Extern declaration if header include fails
+    extern int hzk24_get_font_data(uint8_t gb_high, uint8_t gb_low, uint8_t *buffer);
+    
+    const char * p_text = pString;
+    int x = Xstart;
+    int y = Ystart;
+    
+    while (*p_text != 0) {
+        if ((uint8_t)*p_text < 0x80) {
+            // ASCII
+            Paint_DrawChar(x, y, *p_text, &Font24, Color_Foreground, Color_Background);
+            x += Font24.Width;
+            p_text++;
+        } else {
+            // GBK - 2 bytes
+            uint8_t gb_high = (uint8_t)*p_text;
+            uint8_t gb_low = (uint8_t)*(p_text + 1);
+            
+            // Check bounds and validity
+            if (gb_low == 0) break;
+            
+            uint8_t buffer[72]; // 24*24/8 = 72 bytes
+            if (hzk24_get_font_data(gb_high, gb_low, buffer) == 0) {
+                // Found font - Draw 24x24 bitmap
+                for (int row = 0; row < 24; row++) {
+                    for (int col_byte = 0; col_byte < 3; col_byte++) {
+                        uint8_t data = buffer[row * 3 + col_byte];
+                        for (int bit = 0; bit < 8; bit++) {
+                            if (data & (0x80 >> bit)) {
+                                Paint_SetPixel(x + col_byte * 8 + bit, y + row, Color_Foreground);
+                            } else {
+                                Paint_SetPixel(x + col_byte * 8 + bit, y + row, Color_Background);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Not found, draw '?'
+                Paint_DrawChar(x, y, '?', &Font24, Color_Foreground, Color_Background);
+            }
+            
+            x += 24;
+            p_text += 2;
+        }
+    }
+}
+
 static void display_file_list_on_epaper(void)
 {
     PR_NOTICE("Initializing E-Paper...");
@@ -93,12 +142,11 @@ static void display_file_list_on_epaper(void)
                 }
 
                 if(is_ascii) {
-                    Paint_DrawString_EN(10, y_pos, name, &Font24, WHITE, BLACK);
+                    Paint_DrawString_EN(10, y_pos, name, &Font24, BLACK, WHITE);
                 } else {
                     // Assuming name is GBK (from FAT32 default)
-                    // If Font24CN supports it, it will display. 
-                    // Note: Font24CN in library usually only has limited characters.
-                    Paint_DrawString_CN(10, y_pos, name, &Font24CN, WHITE, BLACK);
+                    // Use HZK24 for full Chinese support
+                    Paint_DrawString_CN_HZK24(10, y_pos, name, BLACK, WHITE);
                 }
                 
                 y_pos += 30;

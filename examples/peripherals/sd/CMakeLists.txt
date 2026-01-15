@@ -28,6 +28,7 @@ list(APPEND APP_SRCS
     ${LIB_EPAPER_SRCS}
     ${LIB_GUI_SRCS}
     ${LIB_FONTS_SRCS}
+    ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts/hzk24.c
 )
 
 ########################################
@@ -38,6 +39,7 @@ add_library(${EXAMPLE_LIB})
 target_include_directories(${EXAMPLE_LIB}
     PRIVATE
         ${CMAKE_SOURCE_DIR}/apps/tuya_t5_pocket/tuya_t5_pocket_ai/src/expand/inc
+        ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts
         ${APP_PATH}/lib/Config
         ${APP_PATH}/lib/e-Paper
         ${APP_PATH}/lib/GUI
