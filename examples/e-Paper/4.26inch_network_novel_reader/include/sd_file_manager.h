@@ -15,7 +15,7 @@
 ************************macro define************************
 ***********************************************************/
 #define SDCARD_MOUNT_PATH "/sdcard"
-#define MAX_FILES 5
+#define MAX_FILES_PER_PAGE 10
 #define MAX_FILENAME_LEN 128
 
 /***********************************************************
@@ -37,9 +37,12 @@ typedef struct {
 } file_info_t;
 
 typedef struct {
-    file_info_t files[MAX_FILES];
-    int file_count;
-    int current_index;
+    file_info_t files[MAX_FILES_PER_PAGE];
+    int file_count;      // Files in current page
+    int total_files;     // Total files on SD card
+    int current_index;   // Index in current page (0 to file_count-1)
+    int current_page;    // Current page number (0-based)
+    int total_pages;     // Total pages
     int is_file_open;
     char current_path[256];
 } file_browser_t;
@@ -61,11 +64,19 @@ int sd_card_init(void);
 int sd_create_sample_files(void);
 
 /**
- * @brief Scan files in SD card root directory
+ * @brief Get total file count in directory
+ * @param path Directory path
+ * @return Number of files, or negative on error
+ */
+int sd_get_total_file_count(const char *path);
+
+/**
+ * @brief Scan files for a specific page
  * @param browser File browser context
+ * @param page Page number (0-based)
  * @return OPRT_OK on success
  */
-int sd_scan_files(file_browser_t *browser);
+int sd_scan_files_paged(file_browser_t *browser, int page);
 
 /**
  * @brief Get file type from extension

@@ -8,6 +8,7 @@
 #include "tal_api.h"
 #include "tkl_output.h"
 #include "tkl_fs.h"
+#include "utf8_to_gbk.h"
 
 #if defined(EBABLE_EXAMPLE_SD_PINMUX) && (EBABLE_EXAMPLE_SD_PINMUX == 1)
 #include "tkl_pinmux.h"
@@ -23,6 +24,7 @@
 
 #define SDCARD_MOUNT_PATH "/sdcard"
 #define RANDOM_FILE_PATH  "/sdcard/random.txt"
+#define CHINESE_FILE_PATH "/sdcard/测试.txt"
 
 /***********************************************************
 ***********************typedef define***********************
@@ -38,6 +40,92 @@ static char sg_read_buf[128] = {0};
 /***********************************************************
 ***********************function define**********************
 ***********************************************************/
+static void __example_sd_chinese_test(void)
+{
+    PR_NOTICE("Starting Chinese filename test...");
+
+    // 1. Write file with Chinese filename (UTF-8 to GBK conversion)
+    const char *utf8_name = "测试.txt";
+    const char *content = "This is a test file with Chinese filename.";
+    char gbk_name[128] = {0};
+    char full_path[256] = {0};
+    
+    // Convert filename from UTF-8 to GBK
+    // Note: FAT32 on embedded systems often uses CP936 (GBK) for LFN if not configured for UTF-8
+    // We try to use GBK for filename to be compatible with Windows default behavior for older non-Unicode programs
+    // or if the filesystem layer expects local encoding.
+    int ret = utf8_to_gbk_buf((const uint8_t *)utf8_name, strlen(utf8_name), (uint8_t *)gbk_name, sizeof(gbk_name) - 1);
+    
+    if (ret > 0) {
+        snprintf(full_path, sizeof(full_path), "%s/%s", SDCARD_MOUNT_PATH, gbk_name);
+        PR_NOTICE("Creating file with GBK name: %s (Hex: %02X %02X %02X %02X)", 
+                  full_path, (uint8_t)gbk_name[0], (uint8_t)gbk_name[1], (uint8_t)gbk_name[2], (uint8_t)gbk_name[3]);
+    } else {
+        PR_ERR("Failed to convert filename to GBK, using UTF-8 directly");
+        snprintf(full_path, sizeof(full_path), "%s/%s", SDCARD_MOUNT_PATH, utf8_name);
+    }
+
+    TUYA_FILE file_hdl = tkl_fopen(full_path, "w");
+    if (NULL == file_hdl) {
+        PR_ERR("Open file %s failed", full_path);
+        // Try creating with raw UTF-8 path if GBK failed
+        snprintf(full_path, sizeof(full_path), "%s/%s", SDCARD_MOUNT_PATH, utf8_name);
+        file_hdl = tkl_fopen(full_path, "w");
+        if (NULL == file_hdl) {
+            PR_ERR("Open file %s (UTF-8) failed too", full_path);
+            return;
+        }
+    }
+
+    uint32_t write_len = strlen(content);
+    uint32_t ret_len = tkl_fwrite((void *)content, write_len, file_hdl);
+    if (ret_len != write_len) {
+        PR_ERR("Write file %s failed: %d", full_path, ret_len);
+    } else {
+        PR_NOTICE("Write file %s success", full_path);
+    }
+    tkl_fclose(file_hdl);
+
+    // 2. List files in directory
+    PR_NOTICE("Listing files in %s:", SDCARD_MOUNT_PATH);
+    TUYA_DIR dir_hdl = NULL;
+    if (tkl_dir_open(SDCARD_MOUNT_PATH, &dir_hdl) != OPRT_OK) {
+        PR_ERR("Open directory %s failed", SDCARD_MOUNT_PATH);
+        return;
+    }
+
+    TUYA_FILEINFO file_info = {0};
+    while (tkl_dir_read(dir_hdl, &file_info) == OPRT_OK) {
+        char *name = NULL;
+        if (tkl_dir_name(file_info, (const char**)&name) == OPRT_OK) {
+             // Check if name needs GBK -> UTF-8 conversion for display
+             // Simple heuristic: check if it contains high bytes
+             int needs_conversion = 0;
+             for (int i = 0; name[i]; i++) {
+                 if ((unsigned char)name[i] >= 0x80) {
+                     needs_conversion = 1;
+                     break;
+                 }
+             }
+             
+             if (needs_conversion) {
+                 char utf8_out[256] = {0};
+                 // Try to convert GBK name back to UTF-8 for display log
+                 int conv_ret = gbk_to_utf8_buf((const uint8_t *)name, strlen(name), (uint8_t *)utf8_out, sizeof(utf8_out) - 1);
+                 if (conv_ret > 0) {
+                     PR_NOTICE("Found file (GBK->UTF8): %s [Raw: %s]", utf8_out, name);
+                 } else {
+                     PR_NOTICE("Found file (Raw): %s", name);
+                 }
+             } else {
+                 PR_NOTICE("Found file: %s", name);
+             }
+        }
+    }
+    tkl_dir_close(dir_hdl);
+    PR_NOTICE("Chinese filename test finished.");
+}
+
 static void __example_sd_test(void)
 {
     int random_value = tal_system_get_random(0xFFFFFFFF);
@@ -119,6 +207,7 @@ static void __example_sd_task(void *param)
 
     while (1) {
         __example_sd_test();
+        __example_sd_chinese_test();
         tal_system_sleep(3 * 1000);
     }
 }

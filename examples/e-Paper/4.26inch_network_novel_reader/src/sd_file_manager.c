@@ -171,62 +171,127 @@ file_type_e sd_get_file_type(const char *filename)
 }
 
 /**
- * @brief Scan files in directory
+ * @brief Check if a file should be included in the list
  */
-int sd_scan_files(file_browser_t *browser)
+static BOOL_T is_supported_file(const char *name)
 {
-    if (!browser) return OPRT_INVALID_PARM;
+    if (!name) return FALSE;
     
-    PR_NOTICE("Scanning SD card files...");
+    // Skip hidden files and parent/current directory
+    if (name[0] == '.') return FALSE;
     
-    memset(browser, 0, sizeof(file_browser_t));
-    strncpy(browser->current_path, SDCARD_MOUNT_PATH, sizeof(browser->current_path) - 1);
+    file_type_e type = sd_get_file_type(name);
+    return (type != FILE_TYPE_UNKNOWN);
+}
+
+/**
+ * @brief Get total file count in directory
+ */
+int sd_get_total_file_count(const char *path)
+{
+    if (!path) return OPRT_INVALID_PARM;
     
     TUYA_DIR dir = NULL;
-    int rt = tkl_dir_open(SDCARD_MOUNT_PATH, &dir);
+    int rt = tkl_dir_open(path, &dir);
     if (rt != OPRT_OK || !dir) {
-        PR_ERR("Failed to open directory: %s (ret=%d)", SDCARD_MOUNT_PATH, rt);
+        PR_ERR("Failed to open directory: %s (ret=%d)", path, rt);
         return OPRT_COM_ERROR;
     }
     
+    int count = 0;
     TUYA_FILEINFO info = NULL;
-    while (tkl_dir_read(dir, &info) == OPRT_OK && browser->file_count < MAX_FILES) {
-        // Check if info is valid before using it
-        if (!info) {
-            PR_WARN("tkl_dir_read returned OK but info is NULL, stopping scan");
-            break;
-        }
+    
+    while (tkl_dir_read(dir, &info) == OPRT_OK) {
+        if (!info) break;
         
         const char *name = NULL;
         if (tkl_dir_name(info, &name) != OPRT_OK || !name) {
             continue;
         }
         
-        // Skip hidden files and current/parent directory
-        if (name[0] == '.') continue;
-        
-        // Check if it's a regular file
-        BOOL_T is_regular = FALSE;
-        if (tkl_dir_is_regular(info, &is_regular) != OPRT_OK || !is_regular) {
-            continue;
-        }
-        
-        file_type_e type = sd_get_file_type(name);
-        
-        // Only add supported file types
-        if (type != FILE_TYPE_UNKNOWN) {
-            strncpy(browser->files[browser->file_count].name, name, MAX_FILENAME_LEN - 1);
-            browser->files[browser->file_count].type = type;
-            browser->files[browser->file_count].size = 0; // Size not available from dir info
-            browser->file_count++;
-            
-            PR_DEBUG("Found: %s (type=%d)", name, type);
+        if (is_supported_file(name)) {
+            count++;
         }
     }
     
     tkl_dir_close(dir);
+    return count;
+}
+
+/**
+ * @brief Scan files for a specific page
+ */
+int sd_scan_files_paged(file_browser_t *browser, int page)
+{
+    if (!browser) return OPRT_INVALID_PARM;
+    if (page < 0) page = 0;
     
-    PR_NOTICE("Found %d supported files", browser->file_count);
+    PR_NOTICE("Scanning SD card files (Page %d)...", page);
+    
+    // Update path if needed
+    if (strlen(browser->current_path) == 0) {
+        strncpy(browser->current_path, SDCARD_MOUNT_PATH, sizeof(browser->current_path) - 1);
+    }
+    
+    // Get total count first if not set
+    if (browser->total_files == 0) {
+        browser->total_files = sd_get_total_file_count(browser->current_path);
+        browser->total_pages = (browser->total_files + MAX_FILES_PER_PAGE - 1) / MAX_FILES_PER_PAGE;
+        PR_NOTICE("Total files: %d, Total pages: %d", browser->total_files, browser->total_pages);
+    }
+    
+    // Validate page
+    if (browser->total_pages > 0 && page >= browser->total_pages) {
+        page = browser->total_pages - 1;
+    }
+    browser->current_page = page;
+    
+    // Open directory
+    TUYA_DIR dir = NULL;
+    int rt = tkl_dir_open(browser->current_path, &dir);
+    if (rt != OPRT_OK || !dir) {
+        PR_ERR("Failed to open directory: %s (ret=%d)", browser->current_path, rt);
+        return OPRT_COM_ERROR;
+    }
+    
+    // Calculate skip count
+    int skip_count = page * MAX_FILES_PER_PAGE;
+    int skipped = 0;
+    int added = 0;
+    
+    TUYA_FILEINFO info = NULL;
+    
+    // Reset current page files
+    browser->file_count = 0;
+    
+    while (tkl_dir_read(dir, &info) == OPRT_OK && added < MAX_FILES_PER_PAGE) {
+        if (!info) break;
+        
+        const char *name = NULL;
+        if (tkl_dir_name(info, &name) != OPRT_OK || !name) {
+            continue;
+        }
+        
+        if (is_supported_file(name)) {
+            if (skipped < skip_count) {
+                skipped++;
+                continue;
+            }
+            
+            // Add file to list
+            strncpy(browser->files[added].name, name, MAX_FILENAME_LEN - 1);
+            browser->files[added].type = sd_get_file_type(name);
+            browser->files[added].size = 0; // Size not available
+            added++;
+            
+            PR_DEBUG("Added: %s (type=%d)", name, browser->files[added-1].type);
+        }
+    }
+    
+    browser->file_count = added;
+    tkl_dir_close(dir);
+    
+    PR_NOTICE("Loaded %d files for page %d", browser->file_count, page);
     return OPRT_OK;
 }
 

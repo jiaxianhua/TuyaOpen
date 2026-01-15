@@ -2061,14 +2061,16 @@ static void display_file_browser(void)
     if (rawtime > 0) {
         timeinfo = localtime(&rawtime);
         if (timeinfo) {
-            snprintf(title_info, sizeof(title_info), "SD Card %04d-%02d-%02d %02d:%02d", 
-                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+            snprintf(title_info, sizeof(title_info), "SD Card P%d/%d %02d:%02d", 
+                     g_reader_ctx.browser.current_page + 1, g_reader_ctx.browser.total_pages,
                      timeinfo->tm_hour, timeinfo->tm_min);
         } else {
-            snprintf(title_info, sizeof(title_info), "SD Card Files");
+            snprintf(title_info, sizeof(title_info), "SD Card P%d/%d", 
+                     g_reader_ctx.browser.current_page + 1, g_reader_ctx.browser.total_pages);
         }
     } else {
-        snprintf(title_info, sizeof(title_info), "SD Card Files");
+        snprintf(title_info, sizeof(title_info), "SD Card P%d/%d", 
+                 g_reader_ctx.browser.current_page + 1, g_reader_ctx.browser.total_pages);
     }
     Paint_DrawString_EN(10, 2, title_info, &Font20, BLACK, WHITE);
     
@@ -2076,18 +2078,11 @@ static void display_file_browser(void)
     draw_gbk_char24(450, 2, 0xBC, 0xD6, BLACK, WHITE);
     
     // Calculate how many files can fit on screen
-    // Screen height: 800px (with ROTATE_90, logical height is 800)
-    // Title: 24px, Bottom info: 20px, Margins: 10px
-    // Available: 800 - 24 - 20 - 10 = 746px
-    // Each file line: 32px (Font24 height + spacing)
-    // Max files per screen: 746 / 32 = 23 files
-    #define FILES_PER_SCREEN 23
     #define FILE_LINE_HEIGHT 32
     
-    int start_idx = (g_reader_ctx.browser.current_index / FILES_PER_SCREEN) * FILES_PER_SCREEN;
     int y_pos = 30;  // Start after title
     
-    for (int i = start_idx; i < g_reader_ctx.browser.file_count && i < start_idx + FILES_PER_SCREEN; i++) {
+    for (int i = 0; i < g_reader_ctx.browser.file_count; i++) {
         char line[150];
         const char *type_str = "";
         
@@ -2114,8 +2109,8 @@ static void display_file_browser(void)
     
     // Draw instructions at bottom
     char info[100];
-    snprintf(info, sizeof(info), "File %d/%d - Short:Next Long:Open", 
-             g_reader_ctx.browser.current_index + 1, g_reader_ctx.browser.file_count);
+    snprintf(info, sizeof(info), "File %d/%d (Total %d) - Short:Next Long:Open", 
+             g_reader_ctx.browser.current_index + 1, g_reader_ctx.browser.file_count, g_reader_ctx.browser.total_files);
     Paint_DrawString_EN(10, 775, info, &Font20, BLACK, WHITE);
     
     EPD_4in26_Display(g_image_buffer);
@@ -2628,14 +2623,47 @@ main_loop:
                     // Single click: Next file
                     g_reader_ctx.browser.current_index++;
                     if (g_reader_ctx.browser.current_index >= g_reader_ctx.browser.file_count) {
-                        g_reader_ctx.browser.current_index = 0;
+                        // End of current page, go to next page
+                        if (g_reader_ctx.browser.current_page < g_reader_ctx.browser.total_pages - 1) {
+                            int next_page = g_reader_ctx.browser.current_page + 1;
+                            if (sd_scan_files_paged(&g_reader_ctx.browser, next_page) == OPRT_OK) {
+                                g_reader_ctx.browser.current_index = 0;
+                            } else {
+                                // Failed to load next page, wrap to start of current
+                                g_reader_ctx.browser.current_index = 0;
+                            }
+                        } else {
+                            // Last page, wrap to first page
+                            if (sd_scan_files_paged(&g_reader_ctx.browser, 0) == OPRT_OK) {
+                                g_reader_ctx.browser.current_index = 0;
+                            } else {
+                                g_reader_ctx.browser.current_index = 0;
+                            }
+                        }
                     }
                     display_file_browser();
                 } else if (action == BUTTON_ACTION_PREV) {
                     // Double click: Previous file
                     g_reader_ctx.browser.current_index--;
                     if (g_reader_ctx.browser.current_index < 0) {
-                        g_reader_ctx.browser.current_index = g_reader_ctx.browser.file_count - 1;
+                        // Start of current page, go to previous page
+                        if (g_reader_ctx.browser.current_page > 0) {
+                            int prev_page = g_reader_ctx.browser.current_page - 1;
+                            if (sd_scan_files_paged(&g_reader_ctx.browser, prev_page) == OPRT_OK) {
+                                g_reader_ctx.browser.current_index = g_reader_ctx.browser.file_count - 1;
+                            } else {
+                                // Failed to load prev page
+                                g_reader_ctx.browser.current_index = 0;
+                            }
+                        } else {
+                            // First page, wrap to last page
+                            int last_page = g_reader_ctx.browser.total_pages - 1;
+                            if (sd_scan_files_paged(&g_reader_ctx.browser, last_page) == OPRT_OK) {
+                                g_reader_ctx.browser.current_index = g_reader_ctx.browser.file_count - 1;
+                            } else {
+                                g_reader_ctx.browser.current_index = 0;
+                            }
+                        }
                     }
                     display_file_browser();
                 } else if (action == BUTTON_ACTION_OPEN) {

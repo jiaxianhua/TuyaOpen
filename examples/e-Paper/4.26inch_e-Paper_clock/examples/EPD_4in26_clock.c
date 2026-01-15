@@ -17,10 +17,21 @@
 #include "tal_api.h"
 #include "tkl_output.h"
 #include "netmgr.h"
+#include "tkl_fs.h"
+#include "tkl_pinmux.h"
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+
+// SD Card Configuration
+#define SD_CLK_PIN 14
+#define SD_CMD_PIN 15
+#define SD_D0_PIN 16
+#define SD_D1_PIN 17
+#define SD_D2_PIN 18
+#define SD_D3_PIN 19
+#define SDCARD_MOUNT_PATH "/sdcard"
 
 #if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
 #include "netconn_wifi.h"
@@ -244,6 +255,139 @@ static OPERATE_RET link_status_callback(void *data)
     return OPRT_OK;
 }
 
+/**
+ * @brief Draw string with mixed ASCII and Chinese characters
+ */
+static void DrawString_Mixed(UWORD Xstart, UWORD Ystart, const char * pString, UWORD Color_Foreground, UWORD Color_Background)
+{
+    const char* p_text = pString;
+    int x = Xstart, y = Ystart;
+    
+    while (*p_text != 0) {
+        if (((unsigned char)*p_text) <= 0x7F) {  // ASCII
+            Paint_DrawChar(x, y, *p_text, &Font24, Color_Foreground, Color_Background);
+            x += Font24.Width;
+            p_text++;
+        } else { // Chinese (assume UTF-8 3 bytes)
+            // Check if we have this character in Font24CN
+            int Num;
+            int found = 0;
+            for(Num = 0; Num < Font24CN.size; Num++) {
+                if (((unsigned char)p_text[0] == (unsigned char)Font24CN.table[Num].index[0]) && \
+                    ((unsigned char)*(p_text + 1) == (unsigned char)Font24CN.table[Num].index[1]) && \
+                    ((unsigned char)*(p_text + 2) == (unsigned char)Font24CN.table[Num].index[2])) {
+                    
+                    // Found, draw it using Paint_DrawString_CN logic by creating a temp string
+                    char temp[4] = {p_text[0], p_text[1], p_text[2], 0};
+                    Paint_DrawString_CN(x, y, temp, &Font24CN, Color_Foreground, Color_Background);
+                    found = 1;
+                    break;
+                }
+            }
+            
+            p_text += 3;
+            x += Font24CN.Width; // 32
+        }
+    }
+}
+
+/**
+ * @brief Mount SD card
+ */
+static int mount_sd(void)
+{
+    // Pinmux config
+    tkl_io_pinmux_config(SD_CLK_PIN, TUYA_SDIO_HOST_CLK);
+    tkl_io_pinmux_config(SD_CMD_PIN, TUYA_SDIO_HOST_CMD);
+    tkl_io_pinmux_config(SD_D0_PIN, TUYA_SDIO_HOST_D0);
+    tkl_io_pinmux_config(SD_D1_PIN, TUYA_SDIO_HOST_D1);
+    tkl_io_pinmux_config(SD_D2_PIN, TUYA_SDIO_HOST_D2);
+    tkl_io_pinmux_config(SD_D3_PIN, TUYA_SDIO_HOST_D3);
+
+    // Mount
+    int ret = tkl_fs_mount(SDCARD_MOUNT_PATH, DEV_SDCARD);
+    if (ret != OPRT_OK) {
+        PR_ERR("Mount SD card failed: %d", ret);
+        return ret;
+    }
+    
+    PR_NOTICE("Mount SD card success");
+    return OPRT_OK;
+}
+
+/**
+ * @brief Create a test file with Chinese filename
+ */
+static void create_chinese_test_file(void)
+{
+    // Filename using characters available in Font24CN: 树莓派 (Raspberry Pi)
+    const char *filename = SDCARD_MOUNT_PATH "/树莓派.txt";
+    const char *content = "Hello Tuya!\nThis is a test file with Chinese filename.";
+    
+    PR_NOTICE("Creating test file: %s", filename);
+    
+    TUYA_FILE fp = tkl_fopen(filename, "w");
+    if (fp) {
+        tkl_fwrite((void *)content, strlen(content), fp);
+        tkl_fclose(fp);
+        PR_NOTICE("Created test file successfully");
+    } else {
+        PR_ERR("Failed to create test file");
+    }
+}
+
+/**
+ * @brief List files in SD card and display on e-Paper
+ */
+static void list_and_display_files(UBYTE *BlackImage)
+{
+    PR_NOTICE("Listing files in %s...", SDCARD_MOUNT_PATH);
+    
+    // Clear screen for file list
+    Paint_SelectImage(BlackImage);
+    Paint_Clear(WHITE);
+    Paint_DrawString_EN(10, 10, "SD Card Files:", &Font24, BLACK, WHITE);
+    
+    TUYA_DIR dir = NULL;
+    if (tkl_dir_open(SDCARD_MOUNT_PATH, &dir) != OPRT_OK) {
+        PR_ERR("Open directory failed");
+        Paint_DrawString_EN(10, 50, "Dir Open Failed!", &Font24, BLACK, WHITE);
+        EPD_4in26_Display_Base(BlackImage);
+        return;
+    }
+
+    int y = 50;
+    TUYA_FILEINFO info = NULL;
+    int count = 0;
+    
+    while (tkl_dir_read(dir, &info) == OPRT_OK) {
+        const char *name = NULL;
+        if (tkl_dir_name(info, &name) == OPRT_OK && name) {
+            // Skip hidden files
+            if (name[0] == '.') continue;
+            
+            PR_NOTICE("Found file: %s", name);
+            
+            if (y < EPD_4in26_HEIGHT - 30) {
+                 DrawString_Mixed(10, y, name, BLACK, WHITE);
+                 y += 35;
+                 count++;
+            }
+        }
+    }
+    tkl_dir_close(dir);
+    
+    if (count == 0) {
+        Paint_DrawString_EN(10, 50, "No files found", &Font24, BLACK, WHITE);
+        // Draw helpful tip
+        Paint_DrawString_EN(10, 90, "Check SD Mount", &Font24, BLACK, WHITE);
+    }
+    
+    PR_NOTICE("Displaying file list...");
+    EPD_4in26_Display_Base(BlackImage);
+    DEV_Delay_ms(3000); // Show for 3 seconds
+}
+
 int EPD_clock_test(void)
 {
     printf("EPD_4in26_clock Demo with Network Time Sync\r\n");
@@ -339,12 +483,29 @@ int EPD_clock_test(void)
     EPD_4in26_Display_Base(BlackImage);
     DEV_Delay_ms(500);
 
+    // Mount SD Card
+    if (mount_sd() != OPRT_OK) {
+        PR_ERR("Failed to mount SD card");
+    } else {
+        // Create test file
+        create_chinese_test_file();
+    }
+
+    // List and display files from SD card
+    // Use a smaller buffer for file listing if needed, or reuse full screen buffer
+    // Note: The BlackImage is currently full screen size
+    list_and_display_files(BlackImage);
+
+    // Free the full screen buffer to save memory before clock loop
+    free(BlackImage);
+    BlackImage = NULL;
+
     // Prepare for time display - use partial refresh with smaller buffer
     printf("Starting clock display (updates every second)...\r\n");
     
     // Create smaller buffer for partial refresh - just for time display
     // Use 300x100 area for time only
-    free(BlackImage);
+    // free(BlackImage); // Already freed above
     UDOUBLE PartImagesize = ((300 % 8 == 0) ? (300 / 8) : (300 / 8 + 1)) * 100;
     if ((BlackImage = (UBYTE *)malloc(PartImagesize)) == NULL) {
         printf("Failed to apply for partial display memory...\r\n");

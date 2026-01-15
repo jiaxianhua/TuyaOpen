@@ -87,6 +87,44 @@ static int find_gb2312(const uint8_t u[3])
     return -1;
 }
 
+/* Linear search: GBK(2B) → return array index, -1 means not found */
+static int find_unicode_by_gbk(const uint8_t g[2])
+{
+    for (int i = 0; i < U2G_COUNT; i++) {
+        const uint8_t *p = u2g_tbl + i * 5;
+        if (p[3] == g[0] && p[4] == g[1]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* -------------------- UTF-8 encoding -------------------- */
+/* Encode unicode code point to UTF-8. Returns bytes written (1-4). */
+static int utf8_encode(uint32_t u, uint8_t *out)
+{
+    if (u <= 0x7F) {
+        out[0] = (uint8_t)u;
+        return 1;
+    } else if (u <= 0x7FF) {
+        out[0] = (uint8_t)(0xC0 | ((u >> 6) & 0x1F));
+        out[1] = (uint8_t)(0x80 | (u & 0x3F));
+        return 2;
+    } else if (u <= 0xFFFF) {
+        out[0] = (uint8_t)(0xE0 | ((u >> 12) & 0x0F));
+        out[1] = (uint8_t)(0x80 | ((u >> 6) & 0x3F));
+        out[2] = (uint8_t)(0x80 | (u & 0x3F));
+        return 3;
+    } else if (u <= 0x10FFFF) {
+        out[0] = (uint8_t)(0xF0 | ((u >> 18) & 0x07));
+        out[1] = (uint8_t)(0x80 | ((u >> 12) & 0x3F));
+        out[2] = (uint8_t)(0x80 | ((u >> 6) & 0x3F));
+        out[3] = (uint8_t)(0x80 | (u & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
 /* -------------------- UTF-8 decoding -------------------- */
 /* Returns: >0 bytes consumed, 0 needs more bytes, -1 illegal sequence */
 static int utf8_decode(const uint8_t *buf, size_t n, uint32_t *out)
@@ -190,4 +228,63 @@ int utf8_to_gbk_buf(const uint8_t *in,  size_t in_len,
     int rc = utf8_to_gbk_stream(read_buf, &c, write_buf, &c);
     if (rc < 0) return rc;            /* Conversion error */
     return (int)c.out_pos;            /* Actual output byte count */
+}
+
+/* ---------- Array-based entry point for GBK -> UTF-8 ---------- */
+int gbk_to_utf8_buf(const uint8_t *in,  size_t in_len,
+                    uint8_t       *out, size_t out_max)
+{
+    size_t in_pos = 0;
+    size_t out_pos = 0;
+    
+    while (in_pos < in_len) {
+        uint8_t b1 = in[in_pos];
+        
+        if (b1 < 0x80) {
+            // ASCII
+            if (out_pos < out_max) {
+                out[out_pos++] = b1;
+            } else {
+                return UTF8TOGBK_NOMEM;
+            }
+            in_pos++;
+        } else {
+            // GBK (2 bytes)
+            if (in_pos + 1 >= in_len) break; // Incomplete GBK
+            
+            uint8_t b2 = in[in_pos + 1];
+            uint8_t gbk[2] = {b1, b2};
+            
+            int idx = find_unicode_by_gbk(gbk);
+            if (idx >= 0) {
+                const uint8_t *p = u2g_tbl + idx * 5;
+                // Unicode is p[0], p[1], p[2] (Big Endian)
+                uint32_t u = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+                
+                uint8_t utf8[4];
+                int n = utf8_encode(u, utf8);
+                if (out_pos + n <= out_max) {
+                    memcpy(out + out_pos, utf8, n);
+                    out_pos += n;
+                } else {
+                    return UTF8TOGBK_NOMEM;
+                }
+            } else {
+                // Not found, emit '?' or original bytes? Emitting '?' is safer for UTF-8 string
+                if (out_pos < out_max) {
+                    out[out_pos++] = '?';
+                } else {
+                    return UTF8TOGBK_NOMEM;
+                }
+            }
+            in_pos += 2;
+        }
+    }
+    
+    // Null terminate if possible
+    if (out_pos < out_max) {
+        out[out_pos] = 0;
+    }
+    
+    return (int)out_pos;
 }
