@@ -322,7 +322,7 @@ parameter:
 void Paint_DrawPoint(UWORD Xpoint, UWORD Ypoint, UWORD Color,
                      DOT_PIXEL Dot_Pixel, DOT_STYLE Dot_Style)
 {
-    if (Xpoint > Paint.Width || Ypoint > Paint.Height) {
+    if (Xpoint >= Paint.Width || Ypoint >= Paint.Height) {
         Debug("Paint_DrawPoint Input exceeds the normal display range\r\n");
         return;
     }
@@ -572,7 +572,7 @@ void Paint_DrawString_EN(UWORD Xstart, UWORD Ystart, const char * pString,
     UWORD Xpoint = Xstart;
     UWORD Ypoint = Ystart;
 
-    if (Xstart > Paint.Width || Ystart > Paint.Height) {
+    if (Xstart >= Paint.Width || Ystart >= Paint.Height) {
         Debug("Paint_DrawString_EN Input exceeds the normal display range\r\n");
         return;
     }

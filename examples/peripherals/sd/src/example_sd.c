@@ -98,18 +98,69 @@ static void Paint_DrawString_CN_HZK24(UWORD Xstart, UWORD Ystart, const char * p
     int y = Ystart;
     
     while (*p_text != 0) {
-        // Safety check for right boundary
-        if (x > Paint.WidthMemory - 24) {
-             break; // Stop drawing if we reach the edge
+        // Handle control characters
+        if ((uint8_t)*p_text < 0x20) {
+            if (*p_text == '\n') {
+                x = Xstart;
+                y += 24;
+                p_text++;
+                continue;
+            }
+            if (*p_text == '\r') {
+                // Ignore CR if followed by LF, otherwise treat as newline
+                if (*(p_text + 1) == '\n') {
+                    p_text++;
+                    continue;
+                } else {
+                    x = Xstart;
+                    y += 24;
+                    p_text++;
+                    continue;
+                }
+            }
+            if (*p_text == '\t') {
+                // Tab = 4 spaces
+                for (int i = 0; i < 4; i++) {
+                    if (x + Font24.Width > Paint.WidthMemory) {
+                        x = Xstart;
+                        y += 24;
+                        if (y + 24 > Paint.HeightMemory) break;
+                    }
+                    Paint_DrawChar(x, y, ' ', &Font24, Color_Foreground, Color_Background);
+                    x += Font24.Width;
+                }
+                p_text++;
+                continue;
+            }
+            // Skip other control characters
+            p_text++;
+            continue;
         }
+        
+        // Stop if out of vertical bounds
+        if (y + 24 > Paint.HeightMemory) break;
 
         if ((uint8_t)*p_text < 0x80) {
             // ASCII
+            // Check horizontal bounds
+            if (x + Font24.Width > Paint.WidthMemory) {
+                x = Xstart;
+                y += 24;
+                if (y + 24 > Paint.HeightMemory) break;
+            }
+            
             Paint_DrawChar(x, y, *p_text, &Font24, Color_Foreground, Color_Background);
             x += Font24.Width;
             p_text++;
         } else {
             // GBK - 2 bytes
+            // Check horizontal bounds
+            if (x + 24 > Paint.WidthMemory) {
+                x = Xstart;
+                y += 24;
+                if (y + 24 > Paint.HeightMemory) break;
+            }
+
             uint8_t gb_high = (uint8_t)*p_text;
             uint8_t gb_low = (uint8_t)*(p_text + 1);
             
@@ -138,6 +189,131 @@ static void Paint_DrawString_CN_HZK24(UWORD Xstart, UWORD Ystart, const char * p
             
             x += 24;
             p_text += 2;
+        }
+    }
+}
+
+// Heuristic to detect UTF-8
+static BOOL_T is_utf8(const uint8_t *data, int len) {
+    int score = 0;
+    int i = 0;
+    while (i < len) {
+        if (data[i] < 0x80) {
+            i++;
+            continue;
+        }
+        if ((data[i] & 0xE0) == 0xC0) { // 2 bytes
+            if (i + 1 >= len) return score > 0; // Truncated at end: assume valid if we saw good chars
+            if ((data[i + 1] & 0xC0) != 0x80) return FALSE;
+            score++;
+            i += 2;
+        } else if ((data[i] & 0xF0) == 0xE0) { // 3 bytes
+            if (i + 2 >= len) return score > 0; // Truncated at end
+            if ((data[i + 1] & 0xC0) != 0x80 || (data[i + 2] & 0xC0) != 0x80) return FALSE;
+            score++;
+            i += 3;
+        } else if ((data[i] & 0xF8) == 0xF0) { // 4 bytes
+            if (i + 3 >= len) return score > 0; // Truncated at end
+            if ((data[i + 1] & 0xC0) != 0x80 || (data[i + 2] & 0xC0) != 0x80 || (data[i + 3] & 0xC0) != 0x80) return FALSE;
+            score++;
+            i += 4;
+        } else {
+            return FALSE;
+        }
+    }
+    return score > 0;
+}
+
+static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD Width, UWORD Height, const char * pString, UWORD Color_Foreground, UWORD Color_Background)
+{
+    extern int hzk24_get_font_data(uint8_t gb_high, uint8_t gb_low, uint8_t *buffer);
+    
+    const uint8_t *p_text = (const uint8_t *)pString;
+    int x = Xstart;
+    int y = Ystart;
+    int line_height = 24;
+    
+    while (*p_text != 0) {
+        // 1. Handle Control Characters
+        if (*p_text == '\n') {
+            x = Xstart;
+            y += line_height;
+            p_text++;
+            continue;
+        }
+        if (*p_text == '\r') {
+            if (*(p_text + 1) == '\n') {
+                p_text++; // Skip CR, let \n handle the newline
+            } else {
+                 x = Xstart;
+                 p_text++;
+            }
+            continue;
+        }
+        if (*p_text == '\t') {
+             x += Font24.Width * 4;
+             if (x > Xstart + Width) {
+                 x = Xstart;
+                 y += line_height;
+             }
+             p_text++;
+             continue;
+        }
+        
+        // 2. Check Vertical Bounds
+        if (y + line_height > Ystart + Height) break;
+        if (y + line_height > Paint.HeightMemory) break;
+        
+        // 3. Handle Visible Characters
+        if (*p_text < 0x80) {
+             // ASCII
+             if (*p_text < 0x20) {
+                 p_text++; // Skip other control chars
+                 continue;
+             }
+
+             if (x + Font24.Width > Xstart + Width || x + Font24.Width > Paint.WidthMemory) {
+                 x = Xstart;
+                 y += line_height;
+                 if (y + line_height > Ystart + Height || y + line_height > Paint.HeightMemory) break;
+             }
+             
+             Paint_DrawChar(x, y, *p_text, &Font24, Color_Foreground, Color_Background);
+             x += Font24.Width;
+             p_text++;
+        } else {
+             // GBK (2 bytes)
+             if (*(p_text + 1) == 0) break; // Incomplete
+
+             if (x + 24 > Xstart + Width || x + 24 > Paint.WidthMemory) {
+                 x = Xstart;
+                 y += line_height;
+                 if (y + line_height > Ystart + Height || y + line_height > Paint.HeightMemory) break;
+             }
+             
+             uint8_t gb_high = *p_text;
+             uint8_t gb_low = *(p_text + 1);
+             
+             uint8_t buffer[72];
+             if (hzk24_get_font_data(gb_high, gb_low, buffer) == 0) {
+                 for (int row = 0; row < 24; row++) {
+                    for (int col_byte = 0; col_byte < 3; col_byte++) {
+                        uint8_t data = buffer[row * 3 + col_byte];
+                        for (int bit = 0; bit < 8; bit++) {
+                            if (data & (0x80 >> bit)) {
+                                Paint_SetPixel(x + col_byte * 8 + bit, y + row, Color_Foreground);
+                            } else {
+                                Paint_SetPixel(x + col_byte * 8 + bit, y + row, Color_Background);
+                            }
+                        }
+                    }
+                }
+             } else {
+                 // Not found, draw space instead of '?' to avoid garbled look for unsupported chars (like fullwidth space)
+                 Paint_DrawChar(x, y, ' ', &Font24, Color_Foreground, Color_Background);
+             }
+             x += 24;
+             p_text += 2;
         }
     }
 }
@@ -289,31 +465,39 @@ static void refresh_ui(void)
         
         TUYA_FILE f = tkl_fopen(full_path, "r");
         if (f) {
-            char buf[512] = {0};
-            tkl_fread(buf, 511, f);
-            tkl_fclose(f);
-            
-            // Simple word wrap display loop
-            int cx = 10, cy = 80;
-            for (int i = 0; i < strlen(buf); i++) {
-                if (buf[i] == '\n') {
-                    cy += 24;
-                    cx = 10;
-                    continue;
-                }
-                if (cx > 780) {
-                    cy += 24;
-                    cx = 10;
-                }
-                if (cy > 550) break;
+            int buf_size = 4096;
+            char *buf = tal_malloc(buf_size + 1);
+            if (buf) {
+                int len = tkl_fread(buf, buf_size, f);
+                if (len < 0) len = 0;
+                buf[len] = 0;
+                tkl_fclose(f);
                 
-                if ((unsigned char)buf[i] < 0x80) {
-                    Paint_DrawChar(cx, cy, buf[i], &Font24, BLACK, WHITE);
-                    cx += 17; // Approx width
+                if (is_utf8((uint8_t*)buf, len)) {
+                     // Add safe null termination for conversion
+                     buf[len] = 0; 
+                     int gbk_buf_len = len * 2;
+                     char *gbk_buf = tal_malloc(gbk_buf_len);
+                     if (gbk_buf) {
+                         int out_len = utf8_to_gbk_buf((uint8_t*)buf, len, (uint8_t*)gbk_buf, gbk_buf_len);
+                         if (out_len > 0) {
+                             gbk_buf[out_len] = 0;
+                             Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, gbk_buf, BLACK, WHITE);
+                         } else {
+                             // Fallback to raw buffer if conversion fails (might be GBK misidentified)
+                             Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, buf, BLACK, WHITE);
+                         }
+                         tal_free(gbk_buf);
+                     } else {
+                         Paint_DrawString_EN(10, 80, "Memory Error (GBK Buf)", &Font24, BLACK, WHITE);
+                     }
                 } else {
-                    // Skip GBK handling for preview for simplicity unless requested
-                    // Just show ASCII
+                     Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, buf, BLACK, WHITE);
                 }
+                tal_free(buf);
+            } else {
+                Paint_DrawString_EN(10, 80, "Memory Error (Buf)", &Font24, BLACK, WHITE);
+                tkl_fclose(f);
             }
         } else {
             Paint_DrawString_EN(10, 80, "Error opening file.", &Font24, BLACK, WHITE);
