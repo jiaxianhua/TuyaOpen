@@ -87,3 +87,34 @@ examples/peripherals/sd/
 1.  **Crash Fix (修复崩溃):** Increased Stack Size to 16KB. (增加栈大小至 16KB)
 2.  **Display Boundary (显示边界):** Fixed `GUI_Paint` out-of-bounds access. (修复 GUI_Paint 越界访问)
 3.  **Garbled Text Fix (乱码修复):** Improved UTF-8 detection to handle buffer boundaries gracefully. (改进 UTF-8 检测以优雅处理缓冲区边界)
+
+## 6. Chinese Character Support Implementation Details (中文汉字支持实现详情)
+
+To enable proper Chinese character display from SD cards, the following specific modifications were made:
+为了支持从 SD 卡显示中文汉字，进行了以下具体修改：
+
+### 6.1. Application Layer (`example_sd.c`)
+
+1.  **Encoding Detection & Conversion (编码检测与转换):**
+    *   **Function:** `is_utf8(const uint8_t *data, int len)`
+    *   **Logic:** Scans the byte stream to detect UTF-8 specific bit patterns. Returns TRUE if confident it's UTF-8.
+    *   **Conversion:** If UTF-8 is detected, `utf8_to_gbk_buf` is called to convert the content to GBK before rendering. This is crucial because the SD card often stores files in UTF-8 (especially from Linux/Mac/Modern Windows), but the `hzk24` font library only understands GBK indices.
+
+2.  **Adaptive Text Rendering (自适应文本渲染):**
+    *   **Function:** `Paint_DrawText_CN_HZK24_Adaptive`
+    *   **Logic:**
+        *   Iterates through the text buffer.
+        *   Distinguishes between ASCII (1 byte) and Chinese GBK (2 bytes).
+        *   **Automatic Line Wrapping:** Checks if the current character fits the screen width (`Paint.WidthMemory`). If not, it moves to the next line (`y += 24`).
+        *   **Fallback Handling:** If a GBK character is not found in the `hzk24` library (e.g., full-width space), it now draws a **Space** instead of `?` to keep the UI clean.
+
+3.  **Stack Size Optimization (栈大小优化):**
+    *   `#define TASK_SD_SIZE (1024 * 16)`
+    *   Increased from default to support the large buffers needed for text conversion and file operations.
+
+### 6.2. Graphics Library (`GUI_Paint.c`)
+
+1.  **Boundary Check Fixes (边界检查修复):**
+    *   **Problem:** The original code used strict inequality `>` checks (e.g., `Xpoint > Paint.Width`). If a pixel was drawn exactly *at* the width limit (index 800), it might pass the check but fail inside the driver or trigger logs.
+    *   **Fix:** Updated checks to inclusive `>=` (e.g., `Xpoint >= Paint.Width`) in `Paint_DrawPoint`, `Paint_DrawLine`, `Paint_DrawRectangle`, `Paint_DrawCircle`, `Paint_DrawChar`, `Paint_DrawString_EN`, and `Paint_DrawNum`.
+    *   **Result:** Prevents "Exceeding display boundaries" error logs when drawing full-screen text.
