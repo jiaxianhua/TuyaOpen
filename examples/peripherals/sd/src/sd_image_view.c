@@ -11,6 +11,7 @@
 
 #include "tjpgd.h"
 #include "lodepng.h"
+#include "tkl_memory.h"
 
 static void* heap_malloc(size_t size)
 {
@@ -21,6 +22,23 @@ static void heap_free(void *ptr)
 {
     if (!ptr) return;
     tal_free(ptr);
+}
+
+static int psram_free_now(void)
+{
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+    return tkl_system_psram_get_free_heap_size();
+#else
+    return -1;
+#endif
+}
+
+static void mem_print(const char *tag)
+{
+    int heap_free = tal_system_get_free_heap_size();
+    int psram_free = psram_free_now();
+    if (psram_free >= 0) PR_NOTICE("%s heap_free=0x%x psram_free=0x%x", tag, heap_free, psram_free);
+    else PR_NOTICE("%s heap_free=0x%x", tag, heap_free);
 }
 
 static TUYA_FILE fopen_read_bin(const char *path)
@@ -358,7 +376,8 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len, B
     if (sz <= 0) return -1;
     TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
-    PR_NOTICE("png: file size=%d heap_free=0x%x", sz, tal_system_get_free_heap_size());
+    PR_NOTICE("png: file size=%d", sz);
+    mem_print("png: before load");
     uint8_t *buf = (uint8_t *)heap_malloc((size_t)sz);
 #if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
     if (!buf) {
@@ -370,6 +389,8 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len, B
         tkl_fclose(f);
         return -1;
     }
+    PR_NOTICE("png: file buffer=%s", (out_from_psram && *out_from_psram) ? "psram" : "heap");
+    mem_print("png: after alloc file buf");
     int rd = tkl_fread(buf, sz, f);
     tkl_fclose(f);
     if (rd != sz) {
@@ -395,6 +416,7 @@ static int draw_png_1bit(const char *path, int x, int y, int w, int h)
 
     unsigned src_w = 0, src_h = 0;
     unsigned char *gray1 = NULL;
+    mem_print("png: before decode");
     unsigned err = lodepng_decode_memory(&gray1, &src_w, &src_h, (const unsigned char *)png, png_len, LCT_GREY, 1);
 #if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
     if (from_psram) tal_psram_free(png);
@@ -403,12 +425,14 @@ static int draw_png_1bit(const char *path, int x, int y, int w, int h)
     heap_free(png);
 #endif
     if (err != 0 || !gray1 || src_w == 0 || src_h == 0) {
-        PR_ERR("png: decode failed err=%u(%s) w=%u h=%u heap_free=0x%x", err, lodepng_error_text(err), src_w, src_h, tal_system_get_free_heap_size());
+        PR_ERR("png: decode failed err=%u(%s) w=%u h=%u", err, lodepng_error_text(err), src_w, src_h);
+        mem_print("png: after decode failed");
         if (gray1) lodepng_free(gray1);
         return -1;
     }
 
-    PR_NOTICE("png: decoded %ux%u 1bpp heap_free=0x%x", src_w, src_h, tal_system_get_free_heap_size());
+    PR_NOTICE("png: decoded %ux%u 1bpp", src_w, src_h);
+    mem_print("png: after decode ok");
     int draw_w, draw_h, off_x, off_y;
     fit_aspect((int)src_w, (int)src_h, w, h, &draw_w, &draw_h, &off_x, &off_y);
     if (draw_w <= 0 || draw_h <= 0) {

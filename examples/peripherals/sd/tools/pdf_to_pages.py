@@ -26,18 +26,27 @@ def main() -> int:
 
     prefix = out_dir / "page"
     try:
-        subprocess.check_call(["pdftoppm", "-png", "-r", "150", str(pdf), str(prefix)])
+        subprocess.check_call([
+            "pdftoppm",
+            "-jpeg",
+            "-jpegopt",
+            "quality=85",
+            "-r",
+            "120",
+            str(pdf),
+            str(prefix),
+        ])
     except subprocess.CalledProcessError as e:
         return e.returncode
 
-    pages = sorted(out_dir.glob("page-*.png"), key=lambda p: int(p.stem.split("-")[-1]))
+    pages = sorted(out_dir.glob("page-*.jpg"), key=lambda p: int(p.stem.split("-")[-1]))
     for i, p in enumerate(pages, start=1):
-        dst = out_dir / f"{i:04d}.png"
+        dst = out_dir / f"{i:04d}.jpg"
         if dst.exists():
             continue
         os.replace(p, dst)
 
-    for p in out_dir.glob("page-*.png"):
+    for p in out_dir.glob("page-*.jpg"):
         p.unlink(missing_ok=True)
 
     print(out_dir)
@@ -46,4 +55,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
