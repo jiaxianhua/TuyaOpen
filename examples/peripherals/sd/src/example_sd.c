@@ -291,7 +291,7 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
         
         // 2. Check Vertical Bounds
         if (y + line_height > Ystart + Height) break;
-        if (y + line_height > Paint.HeightMemory) break;
+        if (y + line_height > Paint.Height) break;
         
         // 3. Handle Visible Characters
         if (*p_text < 0x80) {
@@ -301,10 +301,10 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
                  continue;
              }
 
-             if (x + Font24.Width > Xstart + Width || x + Font24.Width > Paint.WidthMemory) {
+             if (x + Font24.Width > Xstart + Width || x + Font24.Width > Paint.Width) {
                  x = Xstart;
                  y += line_height;
-                 if (y + line_height > Ystart + Height || y + line_height > Paint.HeightMemory) break;
+                 if (y + line_height > Ystart + Height || y + line_height > Paint.Height) break;
              }
              
              Paint_DrawChar(x, y, *p_text, &Font24, Color_Foreground, Color_Background);
@@ -314,10 +314,10 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
              // GBK (2 bytes)
              if (*(p_text + 1) == 0) break; // Incomplete
 
-             if (x + 24 > Xstart + Width || x + 24 > Paint.WidthMemory) {
+             if (x + 24 > Xstart + Width || x + 24 > Paint.Width) {
                  x = Xstart;
                  y += line_height;
-                 if (y + line_height > Ystart + Height || y + line_height > Paint.HeightMemory) break;
+                 if (y + line_height > Ystart + Height || y + line_height > Paint.Height) break;
              }
              
              uint8_t gb_high = *p_text;
@@ -544,20 +544,6 @@ static const char *path_basename(const char *path)
     return p ? (p + 1) : path;
 }
 
-static size_t gbk_safe_prefix_len(const char *s, size_t max_bytes)
-{
-    if (!s) return 0;
-    size_t i = 0;
-    while (s[i] && i < max_bytes) {
-        unsigned char c = (unsigned char)s[i];
-        size_t step = (c < 0x80) ? 1 : 2;
-        if (i + step > max_bytes) break;
-        if (step == 2 && s[i + 1] == 0) break;
-        i += step;
-    }
-    return i;
-}
-
 static void format_time_hhmm(char out[6])
 {
     POSIX_TM_S tm;
@@ -568,9 +554,63 @@ static void format_time_hhmm(char out[6])
     }
 }
 
-#define BRAND_GBK "\xBC\xC4-AIDevLog"
+#define BRAND_GBK "\xBC\xD6-AIDevLog"
 
-static void build_preview_header(char *out, size_t out_len, int max_chars, const char *file_path, int cur_page, int total_pages, int percent, const char time_hhmm[6])
+static int gbk_pixel_width(const char *s)
+{
+    if (!s) return 0;
+    int w = 0;
+    const uint8_t *p = (const uint8_t *)s;
+    while (*p) {
+        if (*p < 0x80) {
+            if (*p < 0x20) {
+                p++;
+                continue;
+            }
+            w += Font24.Width;
+            p++;
+        } else {
+            if (*(p + 1) == 0) break;
+            w += 24;
+            p += 2;
+        }
+    }
+    return w;
+}
+
+static size_t gbk_prefix_fit_px(const char *s, int max_px, int *out_px)
+{
+    if (!s || max_px <= 0) {
+        if (out_px) *out_px = 0;
+        return 0;
+    }
+    size_t i = 0;
+    int w = 0;
+    while (s[i]) {
+        unsigned char c = (unsigned char)s[i];
+        int cw = 0;
+        size_t step = 1;
+        if (c < 0x80) {
+            if (c < 0x20) {
+                i += 1;
+                continue;
+            }
+            cw = Font24.Width;
+            step = 1;
+        } else {
+            if (s[i + 1] == 0) break;
+            cw = 24;
+            step = 2;
+        }
+        if (w + cw > max_px) break;
+        w += cw;
+        i += step;
+    }
+    if (out_px) *out_px = w;
+    return i;
+}
+
+static void build_preview_header(char *out, size_t out_len, int max_px, const char *file_path, int cur_page, int total_pages, int percent, const char time_hhmm[6])
 {
     if (!out_len) return;
     const char *name = path_basename(file_path);
@@ -578,27 +618,37 @@ static void build_preview_header(char *out, size_t out_len, int max_chars, const
     snprintf(base, sizeof(base), "%s", name ? name : "");
 
     char suffix[96];
-    snprintf(suffix, sizeof(suffix), " %d/%d %d%% %s %s", cur_page, total_pages, percent, time_hhmm, BRAND_GBK);
-
-    int max_bytes = (max_chars > 0) ? max_chars : 0;
-    if (max_bytes > (int)out_len - 1) max_bytes = (int)out_len - 1;
-
-    size_t suffix_len = strlen(suffix);
-    size_t base_allow = 0;
-    if ((size_t)max_bytes > suffix_len + 1) {
-        base_allow = (size_t)max_bytes - suffix_len - 1;
+    snprintf(suffix, sizeof(suffix), " %d/%d %02d%% %s %s", cur_page, total_pages, percent, time_hhmm, BRAND_GBK);
+    if (gbk_pixel_width(suffix) > max_px) {
+        snprintf(suffix, sizeof(suffix), " %02d%% %s %s", percent, time_hhmm, BRAND_GBK);
+    }
+    if (gbk_pixel_width(suffix) > max_px) {
+        snprintf(suffix, sizeof(suffix), " %02d%% %s", percent, BRAND_GBK);
     }
 
-    size_t base_keep = gbk_safe_prefix_len(base, base_allow);
-    if (base_keep == 0 && base_allow > 0) {
-        base_keep = (base_allow > 1) ? (base_allow - 1) : base_allow;
+    int suffix_px = gbk_pixel_width(suffix);
+    int base_px_allow = max_px - suffix_px;
+    if (base_px_allow <= 0) {
+        const char *s = suffix;
+        if (s[0] == ' ') s++;
+        snprintf(out, out_len, "%s", s);
+        return;
     }
+
+    int base_px = 0;
+    size_t base_keep = gbk_prefix_fit_px(base, base_px_allow, &base_px);
 
     char clipped[100];
-    if (base_keep < strlen(base) && base_keep + 1 < sizeof(clipped)) {
-        memcpy(clipped, base, base_keep);
-        clipped[base_keep] = '~';
-        clipped[base_keep + 1] = 0;
+    size_t base_len = strlen(base);
+    if (base_keep < base_len) {
+        int tilde_px = Font24.Width;
+        if (base_px + tilde_px <= base_px_allow && base_keep + 1 < sizeof(clipped)) {
+            memcpy(clipped, base, base_keep);
+            clipped[base_keep] = '~';
+            clipped[base_keep + 1] = 0;
+        } else {
+            snprintf(clipped, sizeof(clipped), "~");
+        }
     } else {
         snprintf(clipped, sizeof(clipped), "%s", base);
     }
@@ -778,7 +828,7 @@ static void refresh_ui(void)
 
         int cur_page = 1;
         int total_pages = 1;
-        int max_chars = (int)((Paint.Width - 20) / Font24.Width);
+        int max_px = (int)Paint.Width - 20;
 
         int max_w = Paint.Width - 2 * TEXT_MARGIN_X;
         int lines_per_page = content_h / TEXT_LINE_HEIGHT;
@@ -797,7 +847,7 @@ static void refresh_ui(void)
         }
 
         char header[160];
-        build_preview_header(header, sizeof(header), max_chars, sg_app_ctx.viewing_file, cur_page, total_pages, percent, time_hhmm);
+        build_preview_header(header, sizeof(header), max_px, sg_app_ctx.viewing_file, cur_page, total_pages, percent, time_hhmm);
         Paint_DrawString_CN_HZK24(10, header_y, header, BLACK, WHITE);
         Paint_DrawLine(10, header_line_y, Paint.Width - 10, header_line_y, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
 
