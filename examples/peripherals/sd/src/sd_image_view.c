@@ -12,23 +12,15 @@
 #include "tjpgd.h"
 #include "lodepng.h"
 
-static void* img_malloc(size_t size)
+static void* heap_malloc(size_t size)
 {
-#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
-    return tal_psram_malloc(size);
-#else
     return tal_malloc(size);
-#endif
 }
 
-static void img_free(void *ptr)
+static void heap_free(void *ptr)
 {
     if (!ptr) return;
-#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
-    tal_psram_free(ptr);
-#else
     tal_free(ptr);
-#endif
 }
 
 static TUYA_FILE fopen_read_bin(const char *path)
@@ -325,7 +317,7 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
     dev.h = h;
 
     size_t pool_sz = 96 * 1024;
-    void *pool = img_malloc(pool_sz);
+    void *pool = heap_malloc(pool_sz);
     if (!pool) {
         tkl_fclose(f);
         return -1;
@@ -334,7 +326,7 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
     JDEC jd = {0};
     JRESULT r = jd_prepare(&jd, tjpgd_infunc, pool, pool_sz, &dev);
     if (r != JDR_OK) {
-        img_free(pool);
+        heap_free(pool);
         tkl_fclose(f);
         return -1;
     }
@@ -344,14 +336,14 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
 
     fit_aspect(dev.src_w, dev.src_h, w, h, &dev.draw_w, &dev.draw_h, &dev.off_x, &dev.off_y);
     if (dev.draw_w <= 0 || dev.draw_h <= 0) {
-        img_free(pool);
+        heap_free(pool);
         tkl_fclose(f);
         return -1;
     }
 
     r = jd_decomp(&jd, tjpgd_outfunc, 0);
 
-    img_free(pool);
+    heap_free(pool);
     tkl_fclose(f);
     return (r == JDR_OK) ? 0 : -1;
 }
@@ -365,7 +357,7 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len)
     if (sz <= 0) return -1;
     TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
-    uint8_t *buf = (uint8_t *)img_malloc((size_t)sz);
+    uint8_t *buf = (uint8_t *)heap_malloc((size_t)sz);
     if (!buf) {
         tkl_fclose(f);
         return -1;
@@ -373,24 +365,12 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len)
     int rd = tkl_fread(buf, sz, f);
     tkl_fclose(f);
     if (rd != sz) {
-        img_free(buf);
+        heap_free(buf);
         return -1;
     }
     *out_buf = buf;
     *out_len = (size_t)sz;
     return 0;
-}
-
-static uint8_t dither_thresh4(int x, int y)
-{
-    static const uint8_t m[16] = {
-        0,  8,  2, 10,
-        12, 4, 14, 6,
-        3, 11, 1,  9,
-        15, 7, 13, 5
-    };
-    uint8_t v = m[((y & 3) << 2) | (x & 3)];
-    return (uint8_t)(v * 16 + 8);
 }
 
 static int draw_png_1bit(const char *path, int x, int y, int w, int h)
@@ -399,41 +379,36 @@ static int draw_png_1bit(const char *path, int x, int y, int w, int h)
     size_t png_len = 0;
     if (load_file_all(path, &png, &png_len) != 0) return -1;
 
-    unsigned char *rgba = NULL;
     unsigned src_w = 0, src_h = 0;
-    unsigned err = lodepng_decode32(&rgba, &src_w, &src_h, (const unsigned char *)png, png_len);
-    img_free(png);
-    if (err != 0 || !rgba || src_w == 0 || src_h == 0) {
-        if (rgba) lodepng_free(rgba);
+    unsigned char *gray1 = NULL;
+    unsigned err = lodepng_decode_memory(&gray1, &src_w, &src_h, (const unsigned char *)png, png_len, LCT_GREY, 1);
+    heap_free(png);
+    if (err != 0 || !gray1 || src_w == 0 || src_h == 0) {
+        if (gray1) lodepng_free(gray1);
         return -1;
     }
 
     int draw_w, draw_h, off_x, off_y;
     fit_aspect((int)src_w, (int)src_h, w, h, &draw_w, &draw_h, &off_x, &off_y);
     if (draw_w <= 0 || draw_h <= 0) {
-        lodepng_free(rgba);
+        lodepng_free(gray1);
         return -1;
     }
 
+    size_t row_stride = ((size_t)src_w + 7u) >> 3;
     for (int dy = 0; dy < draw_h; dy++) {
         int sy = (int)((int64_t)dy * (int)src_h / draw_h);
-        const unsigned char *row = rgba + ((size_t)sy * (size_t)src_w * 4u);
+        const uint8_t *row = gray1 + (size_t)sy * row_stride;
         for (int dx = 0; dx < draw_w; dx++) {
             int sx = (int)((int64_t)dx * (int)src_w / draw_w);
-            const unsigned char *p = row + (size_t)sx * 4u;
-            uint8_t r = p[0];
-            uint8_t g = p[1];
-            uint8_t b = p[2];
-            uint8_t a = p[3];
-            uint8_t yy = luma_u8(r, g, b);
-            if (a < 16) yy = 255;
-            uint8_t thr = dither_thresh4(x + off_x + dx, y + off_y + dy);
-            uint8_t c = (yy < thr) ? BLACK : WHITE;
+            uint8_t byte = row[(size_t)sx >> 3];
+            uint8_t bit = (byte >> (7 - (sx & 7))) & 1u;
+            uint8_t c = bit ? WHITE : BLACK;
             Paint_SetPixel((UWORD)(x + off_x + dx), (UWORD)(y + off_y + dy), c);
         }
     }
 
-    lodepng_free(rgba);
+    lodepng_free(gray1);
     return 0;
 }
 
