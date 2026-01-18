@@ -12,6 +12,7 @@
 #include "tjpgd.h"
 #include "lodepng.h"
 #include "tkl_memory.h"
+#include "png_stream_decoder.h"
 
 static void* heap_malloc(size_t size)
 {
@@ -409,6 +410,9 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len, B
 
 static int draw_png_1bit(const char *path, int x, int y, int w, int h)
 {
+    int sr = png_stream_draw_1bit(path, x, y, w, h);
+    if (sr == 0) return 0;
+
     uint8_t *png = NULL;
     size_t png_len = 0;
     BOOL_T from_psram = FALSE;
