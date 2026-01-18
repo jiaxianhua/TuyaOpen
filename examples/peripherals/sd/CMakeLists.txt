@@ -31,6 +31,7 @@ list(APPEND APP_SRCS
     ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts/hzk24.c
     ${CMAKE_SOURCE_DIR}/src/liblvgl/v9/lvgl/src/libs/tjpgd/tjpgd.c
     ${APP_PATH}/src/third_party/lodepng/lodepng_wrap.c
+    ${CMAKE_SOURCE_DIR}/src/libcjson/cJSON/cJSON.c
 )
 
 ########################################
