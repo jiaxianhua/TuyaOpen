@@ -16,6 +16,24 @@ The project is a file reader application running on TuyaOS. It reads files from 
 *   **Input (输入):** Controlled by a 7-key button interface. (7按键控制)
 *   **Display (显示):** Renders graphics and Chinese GBK characters. (渲染图形和 GBK 中文字符)
 
+## 1.1 Key Mapping (按键映射)
+
+在本示例中，按键行为与状态相关：**目录浏览** 与 **文件预览** 两种状态共用同一套按键，但动作不同。
+
+- **SET**：横竖屏切换（0° ↔ 90°），目录/预览均生效
+- **RST**：返回
+  - 目录浏览：返回上一级目录（根目录无动作）
+  - 文件预览：返回到目录列表
+- **MID**：
+  - 选中目录：进入子目录
+  - 选中文件：打开预览
+- **UP / DOWN**：
+  - 目录浏览：移动选中项
+  - 文件预览：上一行/下一行滚动
+- **LEFT / RIGHT**：
+  - 目录浏览：上一页/下一页
+  - 文件预览：上一页/下一页
+
 ## 2. Technical Q&A (技术问答)
 
 ### Q1: Did you optimize the underlying SD FS filename encoding? (是不是优化了底层的 SD FS 文件名编码？)
@@ -53,6 +71,50 @@ The only change related to threading/OS was a **Configuration Parameter** in the
     *   修改：将 `TASK_SD_SIZE` 从默认值（可能是 4KB）增加到了 **16KB**。
 *   **Reason (原因):** The file processing logic (buffers for file reading) and the graphics library (`GUI_Paint`) operations require significant stack memory. The previous small stack size was causing "Mem Overflow" crashes.
     *   **原因：** 文件处理逻辑（文件读取缓冲区）和图形库 (`GUI_Paint`) 操作需要大量的栈内存。之前较小的栈大小导致了“内存溢出”崩溃。
+
+### Q3: FF_CODE_PAGE=936 对中文文件名显示/打开的影响？
+
+**结论（简述）：** 将 `FF_CODE_PAGE` 设为 **936（简体中文/GBK）** 有助于正确显示与打开中文文件名，但是否“无影响”取决于应用层传入/取出的字符串编码是否与 FatFs 配置匹配。
+
+- 关联配置：
+  - [ffconf.h 中 FF_CODE_PAGE=936](file:///home/i/Code/TuyaOpen_jiaxianhua/platform/T5AI/t5_os/ap/components/fatfs/ffconf.h#L83-L109)
+  - [FF_USE_LFN=3（启用长文件名，HEAP 工作缓冲）](file:///home/i/Code/TuyaOpen_jiaxianhua/platform/T5AI/t5_os/ap/components/fatfs/ffconf.h#L112-L127)
+  - [FF_LFN_UNICODE=0（API 使用 ANSI/OEM，而非 UTF-16）](file:///home/i/Code/TuyaOpen_jiaxianhua/platform/T5AI/t5_os/ap/components/fatfs/ffconf.h#L130-L134)
+
+- 工作原理（要点）：
+  - FAT 的长文件名在盘上以 **UTF-16** 存储；FatFs 在 API 层会根据 `FF_LFN_UNICODE` 与 `FF_CODE_PAGE` 做编码转换。
+  - 当前配置 `FF_LFN_UNICODE=0` 表示应用传入/取出的路径字符串是 **ANSI/OEM**，具体编码由 `FF_CODE_PAGE` 指定，即 **CP936（GBK）**。
+  - 因此：应用应以 **CP936/GBK** 与 FatFs 交互；FatFs 负责把 GBK⇄UTF-16 转换，保证目录枚举与文件打开的中文正确。
+
+- 对“显示中文文件名”的影响：
+  - 如果应用层期望用 **GBK** 显示（本项目的中文字库为 GBK），从 FatFs 取出的文件名本身就是 CP936（≈GBK），可直接显示或轻微规范化后显示。
+  - 如果应用层期望用 **UTF-8** 显示，则需要在应用层进行 **CP936→UTF-8** 转换；否则会出现中文乱码。
+
+- 对“打开中文文件”的影响：
+  - 当应用传入路径为 **CP936/GBK** 时，FatFs 能正确匹配盘上的 UTF-16 LFN 并打开文件。
+  - 若应用误传 **UTF-8** 或其他编码，而 `FF_LFN_UNICODE=0` 仍要求 CP936，则可能导致“找不到文件/打开失败/枚举乱码”。
+
+- 与不同来源 SD 卡的兼容性：
+  - Windows 创建的中文文件名通常能正常工作（Windows Explorer 输入为 Unicode，盘上 LFN 为 UTF-16，FatFs 转换正确；API 层按 CP936 往返）。
+  - 来自 Linux/macOS 的 SD 卡，文件名同样以 UTF-16 LFN 存储；只要应用以 CP936 与 FatFs 交互，显示/打开均可；如需 UTF-8 UI，应用层做转换即可。
+
+- 何时考虑调整配置：
+  - 如果希望 API 层直接使用 **Unicode**（避免 OEM 代码页差异），可把 `FF_LFN_UNICODE` 设为 **1**，让 API 使用 **UTF-16**；此时应用需改用 UTF-16 字符串。
+  - 仅使用 UTF-8 作为应用统一编码：当前头文件不提供“API 直接 UTF-8”选项；保持 `FF_LFN_UNICODE=0` 并在应用层做 UTF-8⇄GBK 转换是更现实的选择。
+
+**项目建议：** 保持 `FF_CODE_PAGE=936`，应用层统一以 GBK 与 FatFs 交互；UI 若需 UTF-8，则在展示前做 **CP936→UTF-8** 转换；渲染中文文本继续走 GBK（与 `hzk24` 字库一致）。
+
+### Q4: 能否打开 PNG/JPG/BMP 并转换为 1Bit 黑白显示？
+
+当前示例已实现 **BMP/JPG → 1bit 黑白** 的直接渲染（在渲染时进行灰度阈值化），并能跟随 **SET 旋转** 在横竖屏显示。
+
+- **BMP**
+  - 支持 24-bit（RGB）BMP 与 1-bit（单色）BMP
+- **JPG/JPEG**
+  - 使用轻量解码器 `tjpgd`（Tiny JPEG Decompressor）进行解码，然后转 1bit 输出
+- **PNG**
+  - 该仓库内现有的 `lodepng` 位于 LVGL 组件内，依赖 `lv_conf.h`/LVGL 配置；在当前示例（base framework）里默认不具备直接 PNG 解码条件
+  - 实际使用建议：在 PC 侧把 PNG 转成 BMP（24bit 或 1bit）后拷贝到 SD 卡再浏览
 
 ## 3. Directory Structure (目录结构)
 

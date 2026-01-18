@@ -16,6 +16,10 @@
 #include "tdl_button_manage.h"
 #include "tdd_button_gpio.h"
 #include "tkl_gpio.h"
+#include "sd_image_view.h"
+
+#include <stdio.h>
+#include <string.h>
 
 #if defined(EBABLE_EXAMPLE_SD_PINMUX) && (EBABLE_EXAMPLE_SD_PINMUX == 1)
 #include "tkl_pinmux.h"
@@ -38,14 +42,23 @@
 #define GPIO_PIN_RIGHT  TUYA_GPIO_NUM_30  // P30
 #define GPIO_PIN_MID    TUYA_GPIO_NUM_37  // P37
 #define GPIO_PIN_SET    TUYA_GPIO_NUM_32  // P32
-#define GPIO_PIN_RET    TUYA_GPIO_NUM_39  // P39
+#define GPIO_PIN_RST    TUYA_GPIO_NUM_39  // P39
 
 #define BUTTON_ACTIVE_LEVEL  TUYA_GPIO_LEVEL_LOW
 
 // Display Layout
-#define FILES_PER_PAGE 10
-#define LINE_HEIGHT 30
-#define LIST_START_Y 45
+#define MAX_ITEMS_PER_PAGE 24
+#define LIST_LINE_HEIGHT 30
+
+#define TEXT_MARGIN_X 10
+#define TEXT_MARGIN_TOP 80
+#define TEXT_MARGIN_BOTTOM 10
+#define TEXT_LINE_HEIGHT 24
+
+#define PAGE_HISTORY_DEPTH 32
+#define LINE_HISTORY_DEPTH 64
+
+#define FILE_READ_WINDOW (96 * 1024)
 
 /***********************************************************
 ***********************typedef define***********************
@@ -56,6 +69,11 @@ typedef enum {
     STATE_ERROR
 } APP_STATE_E;
 
+typedef enum {
+    VIEW_TEXT,
+    VIEW_IMAGE
+} VIEW_KIND_E;
+
 typedef struct {
     char name[128]; // File name (UTF-8)
     BOOL_T is_dir;
@@ -64,13 +82,23 @@ typedef struct {
 typedef struct {
     APP_STATE_E state;
     int current_page;
-    int selected_index; // 0 to file_count_in_page - 1
+    int selected_index;
     int total_files;
     int total_pages;
-    FILE_ITEM_T files[FILES_PER_PAGE];
-    int file_count_in_page;
+    int items_per_page;
+    FILE_ITEM_T files[MAX_ITEMS_PER_PAGE];
+    int item_count_in_page;
     char current_path[256];
     char viewing_file[256]; // Full path of file being viewed
+    VIEW_KIND_E view_kind;
+    UWORD rotate;
+    BOOL_T viewing_is_utf8;
+    INT64_T viewing_offset;
+    INT64_T viewing_size;
+    INT64_T page_history[PAGE_HISTORY_DEPTH];
+    int page_hist_len;
+    INT64_T line_history[LINE_HISTORY_DEPTH];
+    int line_hist_len;
     BOOL_T need_refresh;
 } APP_CONTEXT_T;
 
@@ -81,7 +109,7 @@ static THREAD_HANDLE sg_sd_thrd_hdl;
 static APP_CONTEXT_T sg_app_ctx;
 
 // Button configuration
-static TDL_BUTTON_HANDLE hdl_up, hdl_down, hdl_left, hdl_right, hdl_mid, hdl_set, hdl_ret;
+static TDL_BUTTON_HANDLE hdl_up, hdl_down, hdl_left, hdl_right, hdl_mid, hdl_set, hdl_rst;
 
 /***********************************************************
 ***********************function define**********************
@@ -333,7 +361,7 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
 
 static void scan_files(void)
 {
-    sg_app_ctx.file_count_in_page = 0;
+    sg_app_ctx.item_count_in_page = 0;
     
     TUYA_DIR dir_hdl = NULL;
     if (tkl_dir_open(sg_app_ctx.current_path, &dir_hdl) != OPRT_OK) {
@@ -343,7 +371,7 @@ static void scan_files(void)
 
     TUYA_FILEINFO file_info = {0};
     int total_files = 0;
-    int skip_files = sg_app_ctx.current_page * FILES_PER_PAGE;
+    int skip_files = sg_app_ctx.current_page * sg_app_ctx.items_per_page;
     int files_added = 0;
 
     // First pass: count total files (optional, but good for pagination)
@@ -355,11 +383,13 @@ static void scan_files(void)
         if (tkl_dir_name(file_info, (const char**)&name) == OPRT_OK) {
             if (name[0] == '.') continue; // Skip hidden files
             
-            if (total_files >= skip_files && files_added < FILES_PER_PAGE) {
+            if (total_files >= skip_files && files_added < sg_app_ctx.items_per_page) {
                 strncpy(sg_app_ctx.files[files_added].name, name, 127);
-                // Simple is_dir check (TuyaOS might have a macro)
-                // If not available, assume file for now or check mode if exposed
-                sg_app_ctx.files[files_added].is_dir = FALSE; // Default to file
+                BOOL_T is_dir = FALSE;
+                if (tkl_dir_is_directory(file_info, &is_dir) != OPRT_OK) {
+                    is_dir = FALSE;
+                }
+                sg_app_ctx.files[files_added].is_dir = is_dir;
                 files_added++;
             }
             total_files++;
@@ -368,18 +398,219 @@ static void scan_files(void)
     tkl_dir_close(dir_hdl);
 
     sg_app_ctx.total_files = total_files;
-    sg_app_ctx.file_count_in_page = files_added;
-    sg_app_ctx.total_pages = (total_files + FILES_PER_PAGE - 1) / FILES_PER_PAGE;
+    sg_app_ctx.item_count_in_page = files_added;
+    sg_app_ctx.total_pages = (total_files + sg_app_ctx.items_per_page - 1) / sg_app_ctx.items_per_page;
     
     if (sg_app_ctx.total_pages == 0) sg_app_ctx.total_pages = 1;
     
     // Adjust selected index if out of bounds
-    if (sg_app_ctx.selected_index >= sg_app_ctx.file_count_in_page) {
-        sg_app_ctx.selected_index = sg_app_ctx.file_count_in_page - 1;
+    if (sg_app_ctx.selected_index >= sg_app_ctx.item_count_in_page) {
+        sg_app_ctx.selected_index = sg_app_ctx.item_count_in_page - 1;
     }
     if (sg_app_ctx.selected_index < 0) sg_app_ctx.selected_index = 0;
     
-    PR_NOTICE("Scanned page %d: %d files. Total: %d", sg_app_ctx.current_page, sg_app_ctx.file_count_in_page, total_files);
+    PR_NOTICE("Scanned page %d: %d files. Total: %d", sg_app_ctx.current_page, sg_app_ctx.item_count_in_page, total_files);
+}
+
+static BOOL_T path_is_root(const char *path)
+{
+    return (strcmp(path, SDCARD_MOUNT_PATH) == 0);
+}
+
+static void path_to_parent(char *path, size_t path_len)
+{
+    if (path_is_root(path)) return;
+    size_t n = strlen(path);
+    while (n > 0 && path[n - 1] == '/') {
+        path[n - 1] = 0;
+        n--;
+    }
+    char *slash = strrchr(path, '/');
+    if (!slash) {
+        strncpy(path, SDCARD_MOUNT_PATH, path_len - 1);
+        path[path_len - 1] = 0;
+        return;
+    }
+    if (slash == path) {
+        strncpy(path, SDCARD_MOUNT_PATH, path_len - 1);
+        path[path_len - 1] = 0;
+        return;
+    }
+    *slash = 0;
+    if (strlen(path) == 0) {
+        strncpy(path, SDCARD_MOUNT_PATH, path_len - 1);
+        path[path_len - 1] = 0;
+    }
+}
+
+static void path_join(char *out, size_t out_len, const char *base, const char *name)
+{
+    if (!base || !name) {
+        if (out_len) out[0] = 0;
+        return;
+    }
+    if (strcmp(base, "/") == 0) {
+        snprintf(out, out_len, "/%s", name);
+        return;
+    }
+    if (base[strlen(base) - 1] == '/') {
+        snprintf(out, out_len, "%s%s", base, name);
+    } else {
+        snprintf(out, out_len, "%s/%s", base, name);
+    }
+}
+
+static const char *file_ext(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (!dot || dot == name) return "";
+    return dot + 1;
+}
+
+static BOOL_T ext_eq(const char *ext, const char *rhs)
+{
+    if (!ext || !rhs) return FALSE;
+    while (*ext && *rhs) {
+        char a = *ext++;
+        char b = *rhs++;
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return FALSE;
+    }
+    return (*ext == 0 && *rhs == 0);
+}
+
+static BOOL_T is_image_file(const char *name)
+{
+    const char *ext = file_ext(name);
+    return ext_eq(ext, "bmp") || ext_eq(ext, "jpg") || ext_eq(ext, "jpeg") || ext_eq(ext, "png");
+}
+
+static void update_items_per_page(void)
+{
+    int screen_h = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? EPD_4in26_HEIGHT : EPD_4in26_WIDTH;
+    int header_h = 45;
+    int available = screen_h - header_h - 10;
+    int n = available / LIST_LINE_HEIGHT;
+    if (n < 1) n = 1;
+    if (n > MAX_ITEMS_PER_PAGE) n = MAX_ITEMS_PER_PAGE;
+    sg_app_ctx.items_per_page = n;
+}
+
+static BOOL_T detect_file_is_utf8(const char *path)
+{
+    TUYA_FILE f = tkl_fopen(path, "r");
+    if (!f) return FALSE;
+    uint8_t *buf = (uint8_t *)tal_malloc(4096);
+    if (!buf) {
+        tkl_fclose(f);
+        return FALSE;
+    }
+    int len = tkl_fread(buf, 4096, f);
+    if (len < 0) len = 0;
+    BOOL_T r = is_utf8(buf, len);
+    tal_free(buf);
+    tkl_fclose(f);
+    return r;
+}
+
+static void open_item_for_view(void)
+{
+    if (sg_app_ctx.item_count_in_page <= 0) return;
+    FILE_ITEM_T *it = &sg_app_ctx.files[sg_app_ctx.selected_index];
+    if (it->is_dir) return;
+    char full_path[256];
+    path_join(full_path, sizeof(full_path), sg_app_ctx.current_path, it->name);
+    strncpy(sg_app_ctx.viewing_file, full_path, sizeof(sg_app_ctx.viewing_file) - 1);
+    sg_app_ctx.viewing_file[sizeof(sg_app_ctx.viewing_file) - 1] = 0;
+    sg_app_ctx.viewing_size = tkl_fgetsize(sg_app_ctx.viewing_file);
+    sg_app_ctx.viewing_offset = 0;
+    sg_app_ctx.page_hist_len = 0;
+    sg_app_ctx.line_hist_len = 0;
+    sg_app_ctx.view_kind = is_image_file(it->name) ? VIEW_IMAGE : VIEW_TEXT;
+    sg_app_ctx.viewing_is_utf8 = (sg_app_ctx.view_kind == VIEW_TEXT) ? detect_file_is_utf8(sg_app_ctx.viewing_file) : FALSE;
+}
+
+static int display_image_1bit(const char *path, int x, int y, int w, int h)
+{
+    return sd_draw_image_1bit(path, x, y, w, h);
+}
+
+static size_t utf8_seq_len(uint8_t c)
+{
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static size_t advance_one_line_in_buf(const uint8_t *buf, size_t len, BOOL_T is_utf8_enc, int max_width)
+{
+    int x = 0;
+    size_t i = 0;
+    while (i < len) {
+        uint8_t c = buf[i];
+        if (c == '\n') {
+            return i + 1;
+        }
+        if (c == '\r') {
+            if (i + 1 < len && buf[i + 1] == '\n') return i + 2;
+            return i + 1;
+        }
+        int glyph_w = 0;
+        size_t step = 1;
+        if (c < 0x80) {
+            if (c < 0x20) {
+                i += 1;
+                continue;
+            }
+            glyph_w = Font24.Width;
+            step = 1;
+        } else {
+            glyph_w = 24;
+            if (is_utf8_enc) {
+                step = utf8_seq_len(c);
+                if (i + step > len) step = len - i;
+            } else {
+                step = (i + 2 <= len) ? 2 : 1;
+            }
+        }
+        if (x > 0 && x + glyph_w > max_width) {
+            return i;
+        }
+        x += glyph_w;
+        i += step;
+    }
+    return i;
+}
+
+static INT64_T advance_lines_in_file(const char *path, INT64_T start_off, int lines, BOOL_T is_utf8_enc, int max_width)
+{
+    if (lines <= 0) return start_off;
+    TUYA_FILE f = tkl_fopen(path, "r");
+    if (!f) return start_off;
+    if (tkl_fseek(f, start_off, SEEK_SET) != 0) {
+        tkl_fclose(f);
+        return start_off;
+    }
+
+    uint8_t *win = (uint8_t *)tal_malloc(FILE_READ_WINDOW);
+    if (!win) {
+        tkl_fclose(f);
+        return start_off;
+    }
+    int rd = tkl_fread(win, FILE_READ_WINDOW, f);
+    if (rd < 0) rd = 0;
+    size_t pos = 0;
+    for (int i = 0; i < lines && pos < (size_t)rd; i++) {
+        size_t step = advance_one_line_in_buf(win + pos, (size_t)rd - pos, is_utf8_enc, max_width);
+        if (step == 0) break;
+        pos += step;
+    }
+    tal_free(win);
+    tkl_fclose(f);
+    return start_off + (INT64_T)pos;
 }
 
 static void refresh_ui(void)
@@ -404,19 +635,19 @@ static void refresh_ui(void)
         return;
     }
     
-    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, 0, WHITE);
+    Paint_NewImage(BlackImage, EPD_4in26_WIDTH, EPD_4in26_HEIGHT, sg_app_ctx.rotate, WHITE);
     Paint_SelectImage(BlackImage);
     Paint_Clear(WHITE);
 
     if (sg_app_ctx.state == STATE_FILE_LIST) {
         // Draw Title
-        char title[64];
-        snprintf(title, sizeof(title), "Files (%d/%d)", sg_app_ctx.current_page + 1, sg_app_ctx.total_pages);
+        char title[96];
+        snprintf(title, sizeof(title), "%s (%d/%d)", sg_app_ctx.current_path, sg_app_ctx.current_page + 1, sg_app_ctx.total_pages);
         Paint_DrawString_EN(10, 10, title, &Font24, BLACK, WHITE);
-        Paint_DrawLine(10, 35, 790, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+        Paint_DrawLine(10, 35, Paint.Width - 10, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
 
-        int y_pos = LIST_START_Y;
-        for (int i = 0; i < sg_app_ctx.file_count_in_page; i++) {
+        int y_pos = 45;
+        for (int i = 0; i < sg_app_ctx.item_count_in_page; i++) {
             UWORD fg = BLACK;
             UWORD bg = WHITE;
             
@@ -424,10 +655,15 @@ static void refresh_ui(void)
             if (i == sg_app_ctx.selected_index) {
                 fg = WHITE;
                 bg = BLACK;
-                Paint_DrawRectangle(5, y_pos - 2, 795, y_pos + 26, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+                Paint_DrawRectangle(5, y_pos - 2, Paint.Width - 5, y_pos + 26, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
             }
 
-            char *name = sg_app_ctx.files[i].name;
+            char display_name[140];
+            const char *name = sg_app_ctx.files[i].name;
+            if (sg_app_ctx.files[i].is_dir) {
+                snprintf(display_name, sizeof(display_name), "%s/", name);
+                name = display_name;
+            }
             int is_ascii = 1;
             for(int j=0; name[j]; j++) {
                 if((unsigned char)name[j] >= 0x80) {
@@ -442,68 +678,80 @@ static void refresh_ui(void)
                 Paint_DrawString_CN_HZK24(10, y_pos, name, fg, bg);
             }
             
-            y_pos += LINE_HEIGHT;
+            y_pos += LIST_LINE_HEIGHT;
         }
         
-        if (sg_app_ctx.file_count_in_page == 0) {
+        if (sg_app_ctx.item_count_in_page == 0) {
             Paint_DrawString_EN(10, 50, "No files found", &Font24, BLACK, WHITE);
         }
     } 
     else if (sg_app_ctx.state == STATE_SHOW_FILE) {
-        // Show file name
         Paint_DrawString_EN(10, 10, "Viewing:", &Font24, BLACK, WHITE);
-        // Paint_DrawString_CN_HZK24(120, 10, sg_app_ctx.viewing_file, BLACK, WHITE); // Might be too long
-        Paint_DrawLine(10, 35, 790, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
-        
-        // Show content (Mock for now, or read first few bytes)
-        // Since reading full file is complex for now, we just show path
-        Paint_DrawString_EN(10, 50, "File Content Preview:", &Font24, BLACK, WHITE);
-        
-        char *fname = sg_app_ctx.files[sg_app_ctx.selected_index].name;
-        char full_path[256];
-        snprintf(full_path, sizeof(full_path), "%s/%s", sg_app_ctx.current_path, fname);
-        
-        TUYA_FILE f = tkl_fopen(full_path, "r");
-        if (f) {
-            int buf_size = 4096;
-            char *buf = tal_malloc(buf_size + 1);
-            if (buf) {
-                int len = tkl_fread(buf, buf_size, f);
-                if (len < 0) len = 0;
-                buf[len] = 0;
-                tkl_fclose(f);
-                
-                if (is_utf8((uint8_t*)buf, len)) {
-                     // Add safe null termination for conversion
-                     buf[len] = 0; 
-                     int gbk_buf_len = len * 2;
-                     char *gbk_buf = tal_malloc(gbk_buf_len);
-                     if (gbk_buf) {
-                         int out_len = utf8_to_gbk_buf((uint8_t*)buf, len, (uint8_t*)gbk_buf, gbk_buf_len);
-                         if (out_len > 0) {
-                             gbk_buf[out_len] = 0;
-                             Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, gbk_buf, BLACK, WHITE);
-                         } else {
-                             // Fallback to raw buffer if conversion fails (might be GBK misidentified)
-                             Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, buf, BLACK, WHITE);
-                         }
-                         tal_free(gbk_buf);
-                     } else {
-                         Paint_DrawString_EN(10, 80, "Memory Error (GBK Buf)", &Font24, BLACK, WHITE);
-                     }
-                } else {
-                     Paint_DrawText_CN_HZK24_Adaptive(10, 80, 780, 400, buf, BLACK, WHITE);
-                }
-                tal_free(buf);
-            } else {
-                Paint_DrawString_EN(10, 80, "Memory Error (Buf)", &Font24, BLACK, WHITE);
-                tkl_fclose(f);
+        Paint_DrawLine(10, 35, Paint.Width - 10, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+
+        if (sg_app_ctx.view_kind == VIEW_IMAGE) {
+            int x = 0;
+            int y = 0;
+            int w = Paint.Width;
+            int h = Paint.Height;
+            if (display_image_1bit(sg_app_ctx.viewing_file, x, y, w, h) != 0) {
+                Paint_DrawString_EN(10, 50, "Image decode failed/unsupported", &Font24, BLACK, WHITE);
             }
         } else {
-            Paint_DrawString_EN(10, 80, "Error opening file.", &Font24, BLACK, WHITE);
+            int max_w = Paint.Width - 2 * TEXT_MARGIN_X;
+            int avail_h = Paint.Height - TEXT_MARGIN_TOP - TEXT_MARGIN_BOTTOM;
+            int lines_per_page = avail_h / TEXT_LINE_HEIGHT;
+            if (lines_per_page < 1) lines_per_page = 1;
+
+            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+            if (end_off < sg_app_ctx.viewing_offset) end_off = sg_app_ctx.viewing_offset;
+            INT64_T need = end_off - sg_app_ctx.viewing_offset;
+            if (need < 0) need = 0;
+            if (need > (INT64_T)FILE_READ_WINDOW) need = (INT64_T)FILE_READ_WINDOW;
+
+            TUYA_FILE f = tkl_fopen(sg_app_ctx.viewing_file, "r");
+            if (f) {
+                if (tkl_fseek(f, sg_app_ctx.viewing_offset, SEEK_SET) == 0) {
+                    char *raw = (char *)tal_malloc((size_t)need + 1);
+                    if (raw) {
+                        int rd = tkl_fread(raw, (int)need, f);
+                        if (rd < 0) rd = 0;
+                        raw[rd] = 0;
+                        if (sg_app_ctx.viewing_is_utf8) {
+                            int gbk_len = rd * 2 + 2;
+                            char *gbk = (char *)tal_malloc(gbk_len);
+                            if (gbk) {
+                                int out_len = utf8_to_gbk_buf((uint8_t *)raw, rd, (uint8_t *)gbk, gbk_len - 1);
+                                if (out_len < 0) out_len = 0;
+                                gbk[out_len] = 0;
+                                Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, TEXT_MARGIN_TOP, max_w, avail_h, gbk, BLACK, WHITE);
+                                tal_free(gbk);
+                            } else {
+                                Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                            }
+                        } else {
+                            Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, TEXT_MARGIN_TOP, max_w, avail_h, raw, BLACK, WHITE);
+                        }
+                        tal_free(raw);
+                    } else {
+                        Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                    }
+                }
+                tkl_fclose(f);
+            } else {
+                Paint_DrawString_EN(10, 50, "Error opening file.", &Font24, BLACK, WHITE);
+            }
+
+            char status[96];
+            int percent = 0;
+            if (sg_app_ctx.viewing_size > 0) {
+                percent = (int)((sg_app_ctx.viewing_offset * 100) / sg_app_ctx.viewing_size);
+                if (percent < 0) percent = 0;
+                if (percent > 100) percent = 100;
+            }
+            snprintf(status, sizeof(status), "UP/DN line  LT/RT page  SET rot  RST back  %d%%", percent);
+            Paint_DrawString_EN(10, Paint.Height - 28, status, &Font24, BLACK, WHITE);
         }
-        
-        Paint_DrawString_EN(10, 560, "Press RET to back", &Font24, BLACK, WHITE);
     }
 
     EPD_4in26_Display(BlackImage);
@@ -523,16 +771,16 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
             if (sg_app_ctx.selected_index > 0) {
                 sg_app_ctx.selected_index--;
                 changed = TRUE;
-            } else if (sg_app_ctx.file_count_in_page > 0) {
-                sg_app_ctx.selected_index = sg_app_ctx.file_count_in_page - 1; // Wrap to bottom
+            } else if (sg_app_ctx.item_count_in_page > 0) {
+                sg_app_ctx.selected_index = sg_app_ctx.item_count_in_page - 1;
                 changed = TRUE;
             }
         } else if (strcmp(name, "DOWN") == 0) {
-            if (sg_app_ctx.selected_index < sg_app_ctx.file_count_in_page - 1) {
+            if (sg_app_ctx.selected_index < sg_app_ctx.item_count_in_page - 1) {
                 sg_app_ctx.selected_index++;
                 changed = TRUE;
             } else {
-                sg_app_ctx.selected_index = 0; // Wrap to top
+                sg_app_ctx.selected_index = 0;
                 changed = TRUE;
             }
         } else if (strcmp(name, "LEFT") == 0) {
@@ -548,15 +796,89 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
                 changed = TRUE;
             }
         } else if (strcmp(name, "MID") == 0) {
-            if (sg_app_ctx.file_count_in_page > 0) {
-                sg_app_ctx.state = STATE_SHOW_FILE;
+            if (sg_app_ctx.item_count_in_page > 0) {
+                FILE_ITEM_T *it = &sg_app_ctx.files[sg_app_ctx.selected_index];
+                if (it->is_dir) {
+                    char next_path[256];
+                    path_join(next_path, sizeof(next_path), sg_app_ctx.current_path, it->name);
+                    strncpy(sg_app_ctx.current_path, next_path, sizeof(sg_app_ctx.current_path) - 1);
+                    sg_app_ctx.current_path[sizeof(sg_app_ctx.current_path) - 1] = 0;
+                    sg_app_ctx.current_page = 0;
+                    sg_app_ctx.selected_index = 0;
+                    scan_files();
+                    changed = TRUE;
+                } else {
+                    sg_app_ctx.state = STATE_SHOW_FILE;
+                    open_item_for_view();
+                    changed = TRUE;
+                }
+            }
+        } else if (strcmp(name, "RST") == 0) {
+            if (!path_is_root(sg_app_ctx.current_path)) {
+                path_to_parent(sg_app_ctx.current_path, sizeof(sg_app_ctx.current_path));
+                sg_app_ctx.current_page = 0;
+                sg_app_ctx.selected_index = 0;
+                scan_files();
                 changed = TRUE;
             }
+        } else if (strcmp(name, "SET") == 0) {
+            sg_app_ctx.rotate = (sg_app_ctx.rotate == ROTATE_0) ? ROTATE_90 : ROTATE_0;
+            update_items_per_page();
+            sg_app_ctx.current_page = 0;
+            sg_app_ctx.selected_index = 0;
+            scan_files();
+            changed = TRUE;
         }
     } else if (sg_app_ctx.state == STATE_SHOW_FILE) {
-        if (strcmp(name, "RET") == 0) {
+        if (strcmp(name, "RST") == 0) {
             sg_app_ctx.state = STATE_FILE_LIST;
             changed = TRUE;
+        } else if (strcmp(name, "SET") == 0) {
+            sg_app_ctx.rotate = (sg_app_ctx.rotate == ROTATE_0) ? ROTATE_90 : ROTATE_0;
+            update_items_per_page();
+            changed = TRUE;
+        } else if (sg_app_ctx.view_kind == VIEW_TEXT) {
+            int max_w = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? (EPD_4in26_WIDTH - 2 * TEXT_MARGIN_X) : (EPD_4in26_HEIGHT - 2 * TEXT_MARGIN_X);
+            int screen_h = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? EPD_4in26_HEIGHT : EPD_4in26_WIDTH;
+            int avail_h = screen_h - TEXT_MARGIN_TOP - TEXT_MARGIN_BOTTOM;
+            int lines_per_page = avail_h / TEXT_LINE_HEIGHT;
+            if (lines_per_page < 1) lines_per_page = 1;
+
+            if (strcmp(name, "DOWN") == 0) {
+                if (sg_app_ctx.line_hist_len < LINE_HISTORY_DEPTH) {
+                    sg_app_ctx.line_history[sg_app_ctx.line_hist_len++] = sg_app_ctx.viewing_offset;
+                }
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, 1, sg_app_ctx.viewing_is_utf8, max_w);
+                if (next > sg_app_ctx.viewing_offset) {
+                    sg_app_ctx.viewing_offset = next;
+                    changed = TRUE;
+                } else if (sg_app_ctx.line_hist_len > 0) {
+                    sg_app_ctx.line_hist_len--;
+                }
+            } else if (strcmp(name, "UP") == 0) {
+                if (sg_app_ctx.line_hist_len > 0) {
+                    sg_app_ctx.viewing_offset = sg_app_ctx.line_history[--sg_app_ctx.line_hist_len];
+                    changed = TRUE;
+                }
+            } else if (strcmp(name, "RIGHT") == 0) {
+                if (sg_app_ctx.page_hist_len < PAGE_HISTORY_DEPTH) {
+                    sg_app_ctx.page_history[sg_app_ctx.page_hist_len++] = sg_app_ctx.viewing_offset;
+                }
+                sg_app_ctx.line_hist_len = 0;
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+                if (next > sg_app_ctx.viewing_offset) {
+                    sg_app_ctx.viewing_offset = next;
+                    changed = TRUE;
+                } else if (sg_app_ctx.page_hist_len > 0) {
+                    sg_app_ctx.page_hist_len--;
+                }
+            } else if (strcmp(name, "LEFT") == 0) {
+                sg_app_ctx.line_hist_len = 0;
+                if (sg_app_ctx.page_hist_len > 0) {
+                    sg_app_ctx.viewing_offset = sg_app_ctx.page_history[--sg_app_ctx.page_hist_len];
+                    changed = TRUE;
+                }
+            }
         }
     }
 
@@ -588,7 +910,7 @@ static void init_buttons(void)
         {"RIGHT", GPIO_PIN_RIGHT, &hdl_right},
         {"MID", GPIO_PIN_MID, &hdl_mid},
         {"SET", GPIO_PIN_SET, &hdl_set},
-        {"RET", GPIO_PIN_RET, &hdl_ret}
+        {"RST", GPIO_PIN_RST, &hdl_rst}
     };
 
     for (int i = 0; i < 7; i++) {
@@ -626,6 +948,8 @@ static void __example_sd_task(void *param)
 
     // Init App State
     memset(&sg_app_ctx, 0, sizeof(sg_app_ctx));
+    sg_app_ctx.rotate = ROTATE_0;
+    update_items_per_page();
     strcpy(sg_app_ctx.current_path, SDCARD_MOUNT_PATH);
     sg_app_ctx.state = STATE_FILE_LIST;
     sg_app_ctx.current_page = 0;

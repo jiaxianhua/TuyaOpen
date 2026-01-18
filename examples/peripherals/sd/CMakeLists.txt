@@ -29,6 +29,7 @@ list(APPEND APP_SRCS
     ${LIB_GUI_SRCS}
     ${LIB_FONTS_SRCS}
     ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts/hzk24.c
+    ${CMAKE_SOURCE_DIR}/src/liblvgl/v9/lvgl/src/libs/tjpgd/tjpgd.c
 )
 
 ########################################
@@ -44,6 +45,7 @@ target_include_directories(${EXAMPLE_LIB}
         ${APP_PATH}/lib/e-Paper
         ${APP_PATH}/lib/GUI
         ${APP_PATH}/lib/Fonts
+        ${CMAKE_SOURCE_DIR}/src/liblvgl/v9/lvgl/src/libs/tjpgd
 )
 
 target_sources(${EXAMPLE_LIB}
