@@ -17,6 +17,7 @@
 #include "tdd_button_gpio.h"
 #include "tkl_gpio.h"
 #include "sd_image_view.h"
+#include "tal_time_service.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -536,6 +537,75 @@ static int display_image_1bit(const char *path, int x, int y, int w, int h)
     return sd_draw_image_1bit(path, x, y, w, h);
 }
 
+static const char *path_basename(const char *path)
+{
+    if (!path) return "";
+    const char *p = strrchr(path, '/');
+    return p ? (p + 1) : path;
+}
+
+static size_t gbk_safe_prefix_len(const char *s, size_t max_bytes)
+{
+    if (!s) return 0;
+    size_t i = 0;
+    while (s[i] && i < max_bytes) {
+        unsigned char c = (unsigned char)s[i];
+        size_t step = (c < 0x80) ? 1 : 2;
+        if (i + step > max_bytes) break;
+        if (step == 2 && s[i + 1] == 0) break;
+        i += step;
+    }
+    return i;
+}
+
+static void format_time_hhmm(char out[6])
+{
+    POSIX_TM_S tm;
+    if (tal_time_get_local_time_custom(0, &tm) == OPRT_OK) {
+        snprintf(out, 6, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    } else {
+        snprintf(out, 6, "--:--");
+    }
+}
+
+#define BRAND_GBK "\xBC\xC4-AIDevLog"
+
+static void build_preview_header(char *out, size_t out_len, int max_chars, const char *file_path, int cur_page, int total_pages, int percent, const char time_hhmm[6])
+{
+    if (!out_len) return;
+    const char *name = path_basename(file_path);
+    char base[96];
+    snprintf(base, sizeof(base), "%s", name ? name : "");
+
+    char suffix[96];
+    snprintf(suffix, sizeof(suffix), " %d/%d %d%% %s %s", cur_page, total_pages, percent, time_hhmm, BRAND_GBK);
+
+    int max_bytes = (max_chars > 0) ? max_chars : 0;
+    if (max_bytes > (int)out_len - 1) max_bytes = (int)out_len - 1;
+
+    size_t suffix_len = strlen(suffix);
+    size_t base_allow = 0;
+    if ((size_t)max_bytes > suffix_len + 1) {
+        base_allow = (size_t)max_bytes - suffix_len - 1;
+    }
+
+    size_t base_keep = gbk_safe_prefix_len(base, base_allow);
+    if (base_keep == 0 && base_allow > 0) {
+        base_keep = (base_allow > 1) ? (base_allow - 1) : base_allow;
+    }
+
+    char clipped[100];
+    if (base_keep < strlen(base) && base_keep + 1 < sizeof(clipped)) {
+        memcpy(clipped, base, base_keep);
+        clipped[base_keep] = '~';
+        clipped[base_keep + 1] = 0;
+    } else {
+        snprintf(clipped, sizeof(clipped), "%s", base);
+    }
+
+    snprintf(out, out_len, "%s%s", clipped, suffix);
+}
+
 static size_t utf8_seq_len(uint8_t c)
 {
     if (c < 0x80) return 1;
@@ -686,22 +756,61 @@ static void refresh_ui(void)
         }
     } 
     else if (sg_app_ctx.state == STATE_SHOW_FILE) {
-        Paint_DrawString_EN(10, 10, "Viewing:", &Font24, BLACK, WHITE);
-        Paint_DrawLine(10, 35, Paint.Width - 10, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+        int header_y = 10;
+        int header_line_y = 35;
+        int footer_h = 28;
+        int footer_y = (Paint.Height > footer_h) ? (Paint.Height - footer_h) : 0;
+        int content_y = header_line_y + 6;
+        int content_h = footer_y - content_y - 2;
+        if (content_h < TEXT_LINE_HEIGHT) content_h = TEXT_LINE_HEIGHT;
+
+        char time_hhmm[6];
+        format_time_hhmm(time_hhmm);
+
+        int percent = 0;
+        if (sg_app_ctx.view_kind == VIEW_TEXT && sg_app_ctx.viewing_size > 0) {
+            percent = (int)((sg_app_ctx.viewing_offset * 100) / sg_app_ctx.viewing_size);
+            if (percent < 0) percent = 0;
+            if (percent > 100) percent = 100;
+        } else if (sg_app_ctx.view_kind == VIEW_IMAGE) {
+            percent = 100;
+        }
+
+        int cur_page = 1;
+        int total_pages = 1;
+        int max_chars = (int)((Paint.Width - 20) / Font24.Width);
+
+        int max_w = Paint.Width - 2 * TEXT_MARGIN_X;
+        int lines_per_page = content_h / TEXT_LINE_HEIGHT;
+        if (lines_per_page < 1) lines_per_page = 1;
+        if (sg_app_ctx.view_kind == VIEW_TEXT) {
+            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+            INT64_T bytes_per_page = end_off - sg_app_ctx.viewing_offset;
+            if (bytes_per_page <= 0) bytes_per_page = 1;
+            if (sg_app_ctx.viewing_size > 0) {
+                total_pages = (int)((sg_app_ctx.viewing_size + bytes_per_page - 1) / bytes_per_page);
+                if (total_pages < 1) total_pages = 1;
+            }
+            cur_page = sg_app_ctx.page_hist_len + 1;
+            if (cur_page < 1) cur_page = 1;
+            if (total_pages < cur_page) total_pages = cur_page;
+        }
+
+        char header[160];
+        build_preview_header(header, sizeof(header), max_chars, sg_app_ctx.viewing_file, cur_page, total_pages, percent, time_hhmm);
+        Paint_DrawString_CN_HZK24(10, header_y, header, BLACK, WHITE);
+        Paint_DrawLine(10, header_line_y, Paint.Width - 10, header_line_y, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
 
         if (sg_app_ctx.view_kind == VIEW_IMAGE) {
             int x = 0;
-            int y = 0;
+            int y = content_y;
             int w = Paint.Width;
-            int h = Paint.Height;
+            int h = content_h;
             if (display_image_1bit(sg_app_ctx.viewing_file, x, y, w, h) != 0) {
                 Paint_DrawString_EN(10, 50, "Image decode failed/unsupported", &Font24, BLACK, WHITE);
             }
         } else {
-            int max_w = Paint.Width - 2 * TEXT_MARGIN_X;
-            int avail_h = Paint.Height - TEXT_MARGIN_TOP - TEXT_MARGIN_BOTTOM;
-            int lines_per_page = avail_h / TEXT_LINE_HEIGHT;
-            if (lines_per_page < 1) lines_per_page = 1;
+            int avail_h = content_h;
 
             INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
             if (end_off < sg_app_ctx.viewing_offset) end_off = sg_app_ctx.viewing_offset;
@@ -724,13 +833,13 @@ static void refresh_ui(void)
                                 int out_len = utf8_to_gbk_buf((uint8_t *)raw, rd, (uint8_t *)gbk, gbk_len - 1);
                                 if (out_len < 0) out_len = 0;
                                 gbk[out_len] = 0;
-                                Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, TEXT_MARGIN_TOP, max_w, avail_h, gbk, BLACK, WHITE);
+                                Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
                                 tal_free(gbk);
                             } else {
                                 Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
                             }
                         } else {
-                            Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, TEXT_MARGIN_TOP, max_w, avail_h, raw, BLACK, WHITE);
+                            Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, raw, BLACK, WHITE);
                         }
                         tal_free(raw);
                     } else {
@@ -743,14 +852,12 @@ static void refresh_ui(void)
             }
 
             char status[96];
-            int percent = 0;
-            if (sg_app_ctx.viewing_size > 0) {
-                percent = (int)((sg_app_ctx.viewing_offset * 100) / sg_app_ctx.viewing_size);
-                if (percent < 0) percent = 0;
-                if (percent > 100) percent = 100;
+            if (Paint.Width < 600) {
+                snprintf(status, sizeof(status), "UP/DN  LT/RT  SET  RST  %d%%", percent);
+            } else {
+                snprintf(status, sizeof(status), "UP/DN line  LT/RT page  SET rot  RST back  %d%%", percent);
             }
-            snprintf(status, sizeof(status), "UP/DN line  LT/RT page  SET rot  RST back  %d%%", percent);
-            Paint_DrawString_EN(10, Paint.Height - 28, status, &Font24, BLACK, WHITE);
+            Paint_DrawString_EN(10, footer_y, status, &Font24, BLACK, WHITE);
         }
     }
 
@@ -838,10 +945,15 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
             update_items_per_page();
             changed = TRUE;
         } else if (sg_app_ctx.view_kind == VIEW_TEXT) {
-            int max_w = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? (EPD_4in26_WIDTH - 2 * TEXT_MARGIN_X) : (EPD_4in26_HEIGHT - 2 * TEXT_MARGIN_X);
+            int screen_w = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? EPD_4in26_WIDTH : EPD_4in26_HEIGHT;
             int screen_h = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? EPD_4in26_HEIGHT : EPD_4in26_WIDTH;
-            int avail_h = screen_h - TEXT_MARGIN_TOP - TEXT_MARGIN_BOTTOM;
-            int lines_per_page = avail_h / TEXT_LINE_HEIGHT;
+            int header_line_y = 35;
+            int footer_h = 28;
+            int content_y = header_line_y + 6;
+            int content_h = screen_h - content_y - footer_h - 2;
+            if (content_h < TEXT_LINE_HEIGHT) content_h = TEXT_LINE_HEIGHT;
+            int max_w = screen_w - 2 * TEXT_MARGIN_X;
+            int lines_per_page = content_h / TEXT_LINE_HEIGHT;
             if (lines_per_page < 1) lines_per_page = 1;
 
             if (strcmp(name, "DOWN") == 0) {
