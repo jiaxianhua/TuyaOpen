@@ -30,6 +30,7 @@ list(APPEND APP_SRCS
     ${LIB_FONTS_SRCS}
     ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts/hzk24.c
     ${CMAKE_SOURCE_DIR}/src/liblvgl/v9/lvgl/src/libs/tjpgd/tjpgd.c
+    ${APP_PATH}/src/third_party/lodepng/lodepng_wrap.c
 )
 
 ########################################
@@ -39,6 +40,8 @@ add_library(${EXAMPLE_LIB})
 
 target_include_directories(${EXAMPLE_LIB}
     PRIVATE
+        ${APP_PATH}/src
+        ${APP_PATH}/src/third_party/lodepng
         ${CMAKE_SOURCE_DIR}/apps/tuya_t5_pocket/tuya_t5_pocket_ai/src/expand/inc
         ${CMAKE_SOURCE_DIR}/examples/e-Paper/4.26inch_network_novel_reader/lib/Fonts
         ${APP_PATH}/lib/Config
@@ -46,6 +49,10 @@ target_include_directories(${EXAMPLE_LIB}
         ${APP_PATH}/lib/GUI
         ${APP_PATH}/lib/Fonts
         ${CMAKE_SOURCE_DIR}/src/liblvgl/v9/lvgl/src/libs/tjpgd
+)
+
+target_compile_definitions(${EXAMPLE_LIB}
+    PRIVATE
 )
 
 target_sources(${EXAMPLE_LIB}

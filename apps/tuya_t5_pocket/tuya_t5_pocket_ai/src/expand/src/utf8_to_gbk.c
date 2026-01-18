@@ -145,7 +145,10 @@ static int utf8_decode(const uint8_t *buf, size_t n, uint32_t *out)
         return 3;
     }
     if ((c & 0xF8) == 0xF0) {          /* 4-byte sequence, this implementation discards or extends */
-        return -1;
+        if (n < 4) return 0;
+        if ((buf[1] & 0xC0) != 0x80 || (buf[2] & 0xC0) != 0x80 || (buf[3] & 0xC0) != 0x80) return -1;
+        *out = ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(buf[1] & 0x3F) << 12) | ((uint32_t)(buf[2] & 0x3F) << 6) | (uint32_t)(buf[3] & 0x3F);
+        return 4;
     }
     return -1;
 }

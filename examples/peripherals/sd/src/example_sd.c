@@ -61,6 +61,9 @@
 
 #define FILE_READ_WINDOW (96 * 1024)
 
+#define PROGRESS_DIR  SDCARD_MOUNT_PATH "/.sd_reader"
+#define PROGRESS_FILE PROGRESS_DIR "/progress.bin"
+
 /***********************************************************
 ***********************typedef define***********************
 ***********************************************************/
@@ -75,9 +78,17 @@ typedef enum {
     VIEW_IMAGE
 } VIEW_KIND_E;
 
+typedef enum {
+    VIEW_ENC_GBK = 0,
+    VIEW_ENC_UTF8,
+    VIEW_ENC_UTF16LE,
+    VIEW_ENC_UTF16BE
+} VIEW_ENC_E;
+
 typedef struct {
     char name[128]; // File name (UTF-8)
     BOOL_T is_dir;
+    INT64_T size;
 } FILE_ITEM_T;
 
 typedef struct {
@@ -93,7 +104,7 @@ typedef struct {
     char viewing_file[256]; // Full path of file being viewed
     VIEW_KIND_E view_kind;
     UWORD rotate;
-    BOOL_T viewing_is_utf8;
+    VIEW_ENC_E viewing_enc;
     INT64_T viewing_offset;
     INT64_T viewing_size;
     INT64_T page_history[PAGE_HISTORY_DEPTH];
@@ -102,6 +113,13 @@ typedef struct {
     int line_hist_len;
     BOOL_T need_refresh;
 } APP_CONTEXT_T;
+
+typedef struct __attribute__((packed)) {
+    uint16_t path_len;
+    uint8_t view_kind;
+    uint8_t rotate;
+    INT64_T offset;
+} PROGRESS_REC_T;
 
 /***********************************************************
 ***********************variable define**********************
@@ -360,6 +378,42 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
 // If the filesystem returns UTF-8, we need to convert to GBK.
 // Based on "Found file (GBK->UTF8)", the RAW was GBK. So we store Raw (GBK).
 
+static void path_join(char *out, size_t out_len, const char *base, const char *name);
+static size_t gbk_prefix_fit_px(const char *s, int max_px, int *out_px);
+
+static void format_size_human(char *out, size_t out_len, INT64_T size)
+{
+    if (!out || out_len == 0) return;
+    if (size < 0) {
+        snprintf(out, out_len, "--");
+        return;
+    }
+    double v = (double)size;
+    const char *unit = "B";
+    if (v >= 1024.0) { v /= 1024.0; unit = "K"; }
+    if (v >= 1024.0) { v /= 1024.0; unit = "M"; }
+    if (v >= 1024.0) { v /= 1024.0; unit = "G"; }
+    if (strcmp(unit, "B") == 0) {
+        snprintf(out, out_len, "%lldB", (long long)size);
+    } else if (v < 10.0) {
+        snprintf(out, out_len, "%.1f%s", v, unit);
+    } else {
+        snprintf(out, out_len, "%.0f%s", v, unit);
+    }
+}
+
+static void clip_name_to_px(char *out, size_t out_len, const char *name, int max_px)
+{
+    if (!out || out_len == 0) return;
+    out[0] = 0;
+    if (!name || max_px <= 0) return;
+    int used_px = 0;
+    size_t fit = gbk_prefix_fit_px(name, max_px, &used_px);
+    if (fit >= out_len) fit = out_len - 1;
+    memcpy(out, name, fit);
+    out[fit] = 0;
+}
+
 static void scan_files(void)
 {
     sg_app_ctx.item_count_in_page = 0;
@@ -386,11 +440,19 @@ static void scan_files(void)
             
             if (total_files >= skip_files && files_added < sg_app_ctx.items_per_page) {
                 strncpy(sg_app_ctx.files[files_added].name, name, 127);
+                sg_app_ctx.files[files_added].name[127] = 0;
                 BOOL_T is_dir = FALSE;
                 if (tkl_dir_is_directory(file_info, &is_dir) != OPRT_OK) {
                     is_dir = FALSE;
                 }
                 sg_app_ctx.files[files_added].is_dir = is_dir;
+                if (is_dir) {
+                    sg_app_ctx.files[files_added].size = -1;
+                } else {
+                    char full_path[256];
+                    path_join(full_path, sizeof(full_path), sg_app_ctx.current_path, sg_app_ctx.files[files_added].name);
+                    sg_app_ctx.files[files_added].size = tkl_fgetsize(full_path);
+                }
                 files_added++;
             }
             total_files++;
@@ -461,6 +523,176 @@ static void path_join(char *out, size_t out_len, const char *base, const char *n
     }
 }
 
+static int mkdir_p(const char *path)
+{
+    if (!path || !path[0]) return -1;
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    size_t n = strlen(tmp);
+    if (n == 0) return -1;
+    if (tmp[n - 1] == '/') tmp[n - 1] = 0;
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (tmp[0]) {
+            if (tkl_fs_mkdir(tmp) != 0) {
+                TUYA_DIR d = NULL;
+                if (tkl_dir_open(tmp, &d) != OPRT_OK) {
+                    *p = '/';
+                    return -1;
+                }
+                tkl_dir_close(d);
+            }
+        }
+        *p = '/';
+    }
+
+    if (tkl_fs_mkdir(tmp) != 0) {
+        TUYA_DIR d = NULL;
+        if (tkl_dir_open(tmp, &d) != OPRT_OK) return -1;
+        tkl_dir_close(d);
+    }
+    return 0;
+}
+
+static void progress_init(void)
+{
+    mkdir_p(PROGRESS_DIR);
+}
+
+static int progress_load(const char *path, VIEW_KIND_E kind, UWORD *out_rotate, INT64_T *out_offset)
+{
+    if (!path || !out_rotate || !out_offset) return -1;
+    TUYA_FILE f = tkl_fopen(PROGRESS_FILE, "r");
+    if (!f) return -1;
+    uint8_t magic[4];
+    if (tkl_fread(magic, 4, f) != 4 || memcmp(magic, "PRG1", 4) != 0) {
+        tkl_fclose(f);
+        return -1;
+    }
+    for (;;) {
+        PROGRESS_REC_T rec;
+        int rd = tkl_fread(&rec, (int)sizeof(rec), f);
+        if (rd != (int)sizeof(rec)) break;
+        if (rec.path_len == 0 || rec.path_len > 512) break;
+        char *p = (char *)tal_malloc(rec.path_len);
+        if (!p) break;
+        if (tkl_fread(p, rec.path_len, f) != (int)rec.path_len) {
+            tal_free(p);
+            break;
+        }
+        int match = (rec.view_kind == (uint8_t)kind) && (rec.path_len == strlen(path)) && (memcmp(p, path, rec.path_len) == 0);
+        tal_free(p);
+        if (match) {
+            *out_rotate = (UWORD)rec.rotate;
+            *out_offset = rec.offset;
+            tkl_fclose(f);
+            return 0;
+        }
+    }
+    tkl_fclose(f);
+    return -1;
+}
+
+static int progress_save(const char *path, VIEW_KIND_E kind, UWORD rotate, INT64_T offset)
+{
+    if (!path) return -1;
+    size_t path_len = strlen(path);
+    if (path_len == 0 || path_len > 512) return -1;
+
+    uint8_t *old_buf = NULL;
+    size_t old_len = 0;
+    TUYA_FILE f = tkl_fopen(PROGRESS_FILE, "r");
+    if (f) {
+        int sz = tkl_fgetsize(PROGRESS_FILE);
+        if (sz > 0 && sz < (1024 * 128)) {
+            old_buf = (uint8_t *)tal_malloc((size_t)sz);
+            if (old_buf) {
+                int rd = tkl_fread(old_buf, sz, f);
+                if (rd == sz) old_len = (size_t)sz;
+                else {
+                    tal_free(old_buf);
+                    old_buf = NULL;
+                    old_len = 0;
+                }
+            }
+        }
+        tkl_fclose(f);
+    }
+
+    size_t new_cap = old_len + sizeof(PROGRESS_REC_T) + path_len + 16;
+    uint8_t *new_buf = (uint8_t *)tal_malloc(new_cap);
+    if (!new_buf) {
+        if (old_buf) tal_free(old_buf);
+        return -1;
+    }
+    size_t w = 0;
+    memcpy(new_buf + w, "PRG1", 4);
+    w += 4;
+
+    int updated = 0;
+    if (old_buf && old_len >= 4 && memcmp(old_buf, "PRG1", 4) == 0) {
+        size_t pos = 4;
+        while (pos + sizeof(PROGRESS_REC_T) <= old_len) {
+            PROGRESS_REC_T rec;
+            memcpy(&rec, old_buf + pos, sizeof(rec));
+            pos += sizeof(rec);
+            if (rec.path_len == 0 || rec.path_len > 512) break;
+            if (pos + rec.path_len > old_len) break;
+            const uint8_t *p = old_buf + pos;
+            int match = (rec.view_kind == (uint8_t)kind) && (rec.path_len == path_len) && (memcmp(p, path, path_len) == 0);
+            pos += rec.path_len;
+
+            if (match) {
+                rec.rotate = (uint8_t)rotate;
+                rec.offset = offset;
+                updated = 1;
+            }
+
+            memcpy(new_buf + w, &rec, sizeof(rec));
+            w += sizeof(rec);
+            memcpy(new_buf + w, p, rec.path_len);
+            w += rec.path_len;
+        }
+    }
+
+    if (!updated) {
+        PROGRESS_REC_T rec;
+        rec.path_len = (uint16_t)path_len;
+        rec.view_kind = (uint8_t)kind;
+        rec.rotate = (uint8_t)rotate;
+        rec.offset = offset;
+        memcpy(new_buf + w, &rec, sizeof(rec));
+        w += sizeof(rec);
+        memcpy(new_buf + w, path, path_len);
+        w += path_len;
+    }
+
+    if (old_buf) tal_free(old_buf);
+
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", PROGRESS_FILE);
+    TUYA_FILE wf = tkl_fopen(tmp, "w");
+    if (!wf) {
+        tal_free(new_buf);
+        return -1;
+    }
+    int wrote = tkl_fwrite(new_buf, (int)w, wf);
+    tkl_fclose(wf);
+    tal_free(new_buf);
+    if (wrote != (int)w) {
+        tkl_fs_remove(tmp);
+        return -1;
+    }
+    tkl_fs_remove(PROGRESS_FILE);
+    if (tkl_fs_rename(tmp, PROGRESS_FILE) != 0) {
+        tkl_fs_remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
 static const char *file_ext(const char *name)
 {
     const char *dot = strrchr(name, '.');
@@ -498,21 +730,53 @@ static void update_items_per_page(void)
     sg_app_ctx.items_per_page = n;
 }
 
-static BOOL_T detect_file_is_utf8(const char *path)
+static VIEW_ENC_E detect_file_encoding(const char *path, INT64_T *out_bom_skip)
 {
+    if (out_bom_skip) *out_bom_skip = 0;
     TUYA_FILE f = tkl_fopen(path, "r");
-    if (!f) return FALSE;
+    if (!f) return VIEW_ENC_GBK;
     uint8_t *buf = (uint8_t *)tal_malloc(4096);
     if (!buf) {
         tkl_fclose(f);
-        return FALSE;
+        return VIEW_ENC_GBK;
     }
     int len = tkl_fread(buf, 4096, f);
     if (len < 0) len = 0;
-    BOOL_T r = is_utf8(buf, len);
-    tal_free(buf);
     tkl_fclose(f);
-    return r;
+
+    if (len >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) {
+        if (out_bom_skip) *out_bom_skip = 3;
+        tal_free(buf);
+        return VIEW_ENC_UTF8;
+    }
+    if (len >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) {
+        if (out_bom_skip) *out_bom_skip = 2;
+        tal_free(buf);
+        return VIEW_ENC_UTF16LE;
+    }
+    if (len >= 2 && buf[0] == 0xFE && buf[1] == 0xFF) {
+        if (out_bom_skip) *out_bom_skip = 2;
+        tal_free(buf);
+        return VIEW_ENC_UTF16BE;
+    }
+
+    if (is_utf8(buf, len)) {
+        tal_free(buf);
+        return VIEW_ENC_UTF8;
+    }
+
+    int zeros_even = 0, zeros_odd = 0, pairs = 0;
+    for (int i = 0; i + 1 < len; i += 2) {
+        if (buf[i] == 0) zeros_even++;
+        if (buf[i + 1] == 0) zeros_odd++;
+        pairs++;
+    }
+    tal_free(buf);
+    if (pairs > 32) {
+        if (zeros_even > (pairs / 3) && zeros_odd < (pairs / 10)) return VIEW_ENC_UTF16BE;
+        if (zeros_odd > (pairs / 3) && zeros_even < (pairs / 10)) return VIEW_ENC_UTF16LE;
+    }
+    return VIEW_ENC_GBK;
 }
 
 static void open_item_for_view(void)
@@ -522,14 +786,50 @@ static void open_item_for_view(void)
     if (it->is_dir) return;
     char full_path[256];
     path_join(full_path, sizeof(full_path), sg_app_ctx.current_path, it->name);
+
+    if (ext_eq(file_ext(it->name), "pdf")) {
+        char pages_dir[256];
+        snprintf(pages_dir, sizeof(pages_dir), "%s", full_path);
+        char *dot = strrchr(pages_dir, '.');
+        if (dot) *dot = 0;
+        strncat(pages_dir, "_pages", sizeof(pages_dir) - strlen(pages_dir) - 1);
+        TUYA_DIR dir = NULL;
+        if (tkl_dir_open(pages_dir, &dir) == OPRT_OK) {
+            tkl_dir_close(dir);
+            strncpy(sg_app_ctx.current_path, pages_dir, sizeof(sg_app_ctx.current_path) - 1);
+            sg_app_ctx.current_path[sizeof(sg_app_ctx.current_path) - 1] = 0;
+            sg_app_ctx.state = STATE_FILE_LIST;
+            sg_app_ctx.current_page = 0;
+            sg_app_ctx.selected_index = 0;
+            scan_files();
+            sg_app_ctx.need_refresh = TRUE;
+            return;
+        }
+    }
+
     strncpy(sg_app_ctx.viewing_file, full_path, sizeof(sg_app_ctx.viewing_file) - 1);
     sg_app_ctx.viewing_file[sizeof(sg_app_ctx.viewing_file) - 1] = 0;
     sg_app_ctx.viewing_size = tkl_fgetsize(sg_app_ctx.viewing_file);
-    sg_app_ctx.viewing_offset = 0;
     sg_app_ctx.page_hist_len = 0;
     sg_app_ctx.line_hist_len = 0;
     sg_app_ctx.view_kind = is_image_file(it->name) ? VIEW_IMAGE : VIEW_TEXT;
-    sg_app_ctx.viewing_is_utf8 = (sg_app_ctx.view_kind == VIEW_TEXT) ? detect_file_is_utf8(sg_app_ctx.viewing_file) : FALSE;
+    INT64_T bom = 0;
+    sg_app_ctx.viewing_enc = (sg_app_ctx.view_kind == VIEW_TEXT) ? detect_file_encoding(sg_app_ctx.viewing_file, &bom) : VIEW_ENC_GBK;
+    sg_app_ctx.viewing_offset = (sg_app_ctx.view_kind == VIEW_TEXT) ? bom : 0;
+
+    UWORD saved_rot = 0;
+    INT64_T saved_off = 0;
+    if (progress_load(sg_app_ctx.viewing_file, sg_app_ctx.view_kind, &saved_rot, &saved_off) == 0) {
+        if (saved_rot == ROTATE_0 || saved_rot == ROTATE_90 || saved_rot == ROTATE_180 || saved_rot == ROTATE_270) {
+            sg_app_ctx.rotate = saved_rot;
+        }
+        if (saved_off >= 0 && saved_off < sg_app_ctx.viewing_size) {
+            sg_app_ctx.viewing_offset = saved_off;
+        }
+    }
+    if ((sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE || sg_app_ctx.viewing_enc == VIEW_ENC_UTF16BE) && (sg_app_ctx.viewing_offset & 1)) {
+        sg_app_ctx.viewing_offset--;
+    }
 }
 
 static int display_image_1bit(const char *path, int x, int y, int w, int h)
@@ -665,7 +965,91 @@ static size_t utf8_seq_len(uint8_t c)
     return 1;
 }
 
-static size_t advance_one_line_in_buf(const uint8_t *buf, size_t len, BOOL_T is_utf8_enc, int max_width)
+static uint16_t u16_at(const uint8_t *p, BOOL_T le)
+{
+    return le ? (uint16_t)p[0] | ((uint16_t)p[1] << 8) : (uint16_t)p[1] | ((uint16_t)p[0] << 8);
+}
+
+static int utf16_to_utf8_buf(const uint8_t *in, int in_len, BOOL_T le, uint8_t *out, int out_cap)
+{
+    int out_len = 0;
+    int i = 0;
+    while (i + 1 < in_len) {
+        uint16_t u = u16_at(in + i, le);
+        i += 2;
+        uint32_t cp = u;
+        if (u >= 0xD800 && u <= 0xDBFF) {
+            if (i + 1 < in_len) {
+                uint16_t lo = u16_at(in + i, le);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000u + (((uint32_t)(u - 0xD800) << 10) | (uint32_t)(lo - 0xDC00));
+                    i += 2;
+                }
+            }
+        }
+        if (cp <= 0x7Fu) {
+            if (out_len + 1 > out_cap) break;
+            out[out_len++] = (uint8_t)cp;
+        } else if (cp <= 0x7FFu) {
+            if (out_len + 2 > out_cap) break;
+            out[out_len++] = (uint8_t)(0xC0 | ((cp >> 6) & 0x1F));
+            out[out_len++] = (uint8_t)(0x80 | (cp & 0x3F));
+        } else if (cp <= 0xFFFFu) {
+            if (out_len + 3 > out_cap) break;
+            out[out_len++] = (uint8_t)(0xE0 | ((cp >> 12) & 0x0F));
+            out[out_len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+            out[out_len++] = (uint8_t)(0x80 | (cp & 0x3F));
+        } else if (cp <= 0x10FFFFu) {
+            if (out_len + 4 > out_cap) break;
+            out[out_len++] = (uint8_t)(0xF0 | ((cp >> 18) & 0x07));
+            out[out_len++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+            out[out_len++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+            out[out_len++] = (uint8_t)(0x80 | (cp & 0x3F));
+        } else {
+            if (out_len + 1 > out_cap) break;
+            out[out_len++] = '?';
+        }
+    }
+    return out_len;
+}
+
+static size_t advance_one_line_in_buf_utf16(const uint8_t *buf, size_t len, BOOL_T le, int max_width)
+{
+    int x = 0;
+    size_t i = 0;
+    while (i + 1 < len) {
+        uint16_t u = u16_at(buf + i, le);
+        if (u == 0x000A) return i + 2;
+        if (u == 0x000D) {
+            if (i + 3 < len && u16_at(buf + i + 2, le) == 0x000A) return i + 4;
+            return i + 2;
+        }
+        int glyph_w = 0;
+        size_t step = 2;
+        if (u < 0x20) {
+            i += 2;
+            continue;
+        }
+        if (u >= 0xD800 && u <= 0xDBFF) {
+            if (i + 3 < len) {
+                uint16_t lo = u16_at(buf + i + 2, le);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) step = 4;
+            }
+            glyph_w = 24;
+        } else if (u < 0x80) {
+            glyph_w = Font24.Width;
+        } else {
+            glyph_w = 24;
+        }
+
+        if (x > 0 && x + glyph_w > max_width) return i;
+        x += glyph_w;
+        i += step;
+    }
+    return i;
+}
+
+static size_t advance_one_line_in_buf_8bit(const uint8_t *buf, size_t len, VIEW_ENC_E enc, int max_width)
 {
     int x = 0;
     size_t i = 0;
@@ -689,7 +1073,7 @@ static size_t advance_one_line_in_buf(const uint8_t *buf, size_t len, BOOL_T is_
             step = 1;
         } else {
             glyph_w = 24;
-            if (is_utf8_enc) {
+            if (enc == VIEW_ENC_UTF8) {
                 step = utf8_seq_len(c);
                 if (i + step > len) step = len - i;
             } else {
@@ -705,11 +1089,12 @@ static size_t advance_one_line_in_buf(const uint8_t *buf, size_t len, BOOL_T is_
     return i;
 }
 
-static INT64_T advance_lines_in_file(const char *path, INT64_T start_off, int lines, BOOL_T is_utf8_enc, int max_width)
+static INT64_T advance_lines_in_file(const char *path, INT64_T start_off, int lines, VIEW_ENC_E enc, int max_width)
 {
     if (lines <= 0) return start_off;
     TUYA_FILE f = tkl_fopen(path, "r");
     if (!f) return start_off;
+    if ((enc == VIEW_ENC_UTF16LE || enc == VIEW_ENC_UTF16BE) && (start_off & 1)) start_off--;
     if (tkl_fseek(f, start_off, SEEK_SET) != 0) {
         tkl_fclose(f);
         return start_off;
@@ -722,9 +1107,13 @@ static INT64_T advance_lines_in_file(const char *path, INT64_T start_off, int li
     }
     int rd = tkl_fread(win, FILE_READ_WINDOW, f);
     if (rd < 0) rd = 0;
+    if ((enc == VIEW_ENC_UTF16LE || enc == VIEW_ENC_UTF16BE) && (rd & 1)) rd--;
     size_t pos = 0;
     for (int i = 0; i < lines && pos < (size_t)rd; i++) {
-        size_t step = advance_one_line_in_buf(win + pos, (size_t)rd - pos, is_utf8_enc, max_width);
+        size_t step = 0;
+        if (enc == VIEW_ENC_UTF16LE) step = advance_one_line_in_buf_utf16(win + pos, (size_t)rd - pos, TRUE, max_width);
+        else if (enc == VIEW_ENC_UTF16BE) step = advance_one_line_in_buf_utf16(win + pos, (size_t)rd - pos, FALSE, max_width);
+        else step = advance_one_line_in_buf_8bit(win + pos, (size_t)rd - pos, enc, max_width);
         if (step == 0) break;
         pos += step;
     }
@@ -778,12 +1167,24 @@ static void refresh_ui(void)
                 Paint_DrawRectangle(5, y_pos - 2, Paint.Width - 5, y_pos + 26, BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
             }
 
+            char size_str[16];
+            if (sg_app_ctx.files[i].is_dir) snprintf(size_str, sizeof(size_str), "DIR");
+            else format_size_human(size_str, sizeof(size_str), sg_app_ctx.files[i].size);
+            int size_px = (int)strlen(size_str) * (int)Font24.Width;
+            int size_x = (int)Paint.Width - 10 - size_px;
+            if (size_x < 10) size_x = 10;
+
             char display_name[140];
             const char *name = sg_app_ctx.files[i].name;
             if (sg_app_ctx.files[i].is_dir) {
                 snprintf(display_name, sizeof(display_name), "%s/", name);
                 name = display_name;
             }
+            int name_max_px = size_x - 10 - Font24.Width;
+            if (name_max_px < 24) name_max_px = 24;
+            char clipped[140];
+            clip_name_to_px(clipped, sizeof(clipped), name, name_max_px);
+            name = clipped;
             int is_ascii = 1;
             for(int j=0; name[j]; j++) {
                 if((unsigned char)name[j] >= 0x80) {
@@ -797,6 +1198,7 @@ static void refresh_ui(void)
             } else {
                 Paint_DrawString_CN_HZK24(10, y_pos, name, fg, bg);
             }
+            Paint_DrawString_EN((UWORD)size_x, y_pos, size_str, &Font24, fg, bg);
             
             y_pos += LIST_LINE_HEIGHT;
         }
@@ -834,7 +1236,7 @@ static void refresh_ui(void)
         int lines_per_page = content_h / TEXT_LINE_HEIGHT;
         if (lines_per_page < 1) lines_per_page = 1;
         if (sg_app_ctx.view_kind == VIEW_TEXT) {
-            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
             INT64_T bytes_per_page = end_off - sg_app_ctx.viewing_offset;
             if (bytes_per_page <= 0) bytes_per_page = 1;
             if (sg_app_ctx.viewing_size > 0) {
@@ -862,7 +1264,16 @@ static void refresh_ui(void)
         } else {
             int avail_h = content_h;
 
-            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+            if (ext_eq(file_ext(sg_app_ctx.viewing_file), "pdf")) {
+                char msg1[96];
+                char msg2[96];
+                const char *bn = path_basename(sg_app_ctx.viewing_file);
+                snprintf(msg1, sizeof(msg1), "PDF: put pages as images in");
+                snprintf(msg2, sizeof(msg2), "%s_pages/", bn ? bn : "file");
+                Paint_DrawString_EN(TEXT_MARGIN_X, content_y, msg1, &Font24, BLACK, WHITE);
+                Paint_DrawString_EN(TEXT_MARGIN_X, content_y + TEXT_LINE_HEIGHT, msg2, &Font24, BLACK, WHITE);
+            } else {
+            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
             if (end_off < sg_app_ctx.viewing_offset) end_off = sg_app_ctx.viewing_offset;
             INT64_T need = end_off - sg_app_ctx.viewing_offset;
             if (need < 0) need = 0;
@@ -876,7 +1287,7 @@ static void refresh_ui(void)
                         int rd = tkl_fread(raw, (int)need, f);
                         if (rd < 0) rd = 0;
                         raw[rd] = 0;
-                        if (sg_app_ctx.viewing_is_utf8) {
+                        if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF8) {
                             int gbk_len = rd * 2 + 2;
                             char *gbk = (char *)tal_malloc(gbk_len);
                             if (gbk) {
@@ -885,6 +1296,28 @@ static void refresh_ui(void)
                                 gbk[out_len] = 0;
                                 Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
                                 tal_free(gbk);
+                            } else {
+                                Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                            }
+                        } else if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE || sg_app_ctx.viewing_enc == VIEW_ENC_UTF16BE) {
+                            int utf8_cap = rd * 2 + 4;
+                            uint8_t *utf8 = (uint8_t *)tal_malloc(utf8_cap);
+                            if (utf8) {
+                                int utf8_len = utf16_to_utf8_buf((uint8_t *)raw, rd, (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE) ? TRUE : FALSE, utf8, utf8_cap - 1);
+                                if (utf8_len < 0) utf8_len = 0;
+                                utf8[utf8_len] = 0;
+                                int gbk_len = utf8_len * 2 + 2;
+                                char *gbk = (char *)tal_malloc(gbk_len);
+                                if (gbk) {
+                                    int out_len = utf8_to_gbk_buf(utf8, (size_t)utf8_len, (uint8_t *)gbk, (size_t)gbk_len - 1);
+                                    if (out_len < 0) out_len = 0;
+                                    gbk[out_len] = 0;
+                                    Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
+                                    tal_free(gbk);
+                                } else {
+                                    Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                                }
+                                tal_free(utf8);
                             } else {
                                 Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
                             }
@@ -899,6 +1332,7 @@ static void refresh_ui(void)
                 tkl_fclose(f);
             } else {
                 Paint_DrawString_EN(10, 50, "Error opening file.", &Font24, BLACK, WHITE);
+            }
             }
 
             char status[96];
@@ -922,6 +1356,7 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
     
     PR_NOTICE("Button %s pressed", name);
     BOOL_T changed = FALSE;
+    BOOL_T save_progress_needed = FALSE;
 
     if (sg_app_ctx.state == STATE_FILE_LIST) {
         if (strcmp(name, "UP") == 0) {
@@ -988,11 +1423,13 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
         }
     } else if (sg_app_ctx.state == STATE_SHOW_FILE) {
         if (strcmp(name, "RST") == 0) {
+            save_progress_needed = TRUE;
             sg_app_ctx.state = STATE_FILE_LIST;
             changed = TRUE;
         } else if (strcmp(name, "SET") == 0) {
             sg_app_ctx.rotate = (sg_app_ctx.rotate == ROTATE_0) ? ROTATE_90 : ROTATE_0;
             update_items_per_page();
+            save_progress_needed = TRUE;
             changed = TRUE;
         } else if (sg_app_ctx.view_kind == VIEW_TEXT) {
             int screen_w = (sg_app_ctx.rotate == ROTATE_0 || sg_app_ctx.rotate == ROTATE_180) ? EPD_4in26_WIDTH : EPD_4in26_HEIGHT;
@@ -1010,9 +1447,10 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
                 if (sg_app_ctx.line_hist_len < LINE_HISTORY_DEPTH) {
                     sg_app_ctx.line_history[sg_app_ctx.line_hist_len++] = sg_app_ctx.viewing_offset;
                 }
-                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, 1, sg_app_ctx.viewing_is_utf8, max_w);
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, 1, sg_app_ctx.viewing_enc, max_w);
                 if (next > sg_app_ctx.viewing_offset) {
                     sg_app_ctx.viewing_offset = next;
+                    save_progress_needed = TRUE;
                     changed = TRUE;
                 } else if (sg_app_ctx.line_hist_len > 0) {
                     sg_app_ctx.line_hist_len--;
@@ -1020,6 +1458,7 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
             } else if (strcmp(name, "UP") == 0) {
                 if (sg_app_ctx.line_hist_len > 0) {
                     sg_app_ctx.viewing_offset = sg_app_ctx.line_history[--sg_app_ctx.line_hist_len];
+                    save_progress_needed = TRUE;
                     changed = TRUE;
                 }
             } else if (strcmp(name, "RIGHT") == 0) {
@@ -1027,9 +1466,10 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
                     sg_app_ctx.page_history[sg_app_ctx.page_hist_len++] = sg_app_ctx.viewing_offset;
                 }
                 sg_app_ctx.line_hist_len = 0;
-                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_is_utf8, max_w);
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
                 if (next > sg_app_ctx.viewing_offset) {
                     sg_app_ctx.viewing_offset = next;
+                    save_progress_needed = TRUE;
                     changed = TRUE;
                 } else if (sg_app_ctx.page_hist_len > 0) {
                     sg_app_ctx.page_hist_len--;
@@ -1038,12 +1478,16 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
                 sg_app_ctx.line_hist_len = 0;
                 if (sg_app_ctx.page_hist_len > 0) {
                     sg_app_ctx.viewing_offset = sg_app_ctx.page_history[--sg_app_ctx.page_hist_len];
+                    save_progress_needed = TRUE;
                     changed = TRUE;
                 }
             }
         }
     }
 
+    if (save_progress_needed && sg_app_ctx.viewing_file[0]) {
+        progress_save(sg_app_ctx.viewing_file, sg_app_ctx.view_kind, sg_app_ctx.rotate, sg_app_ctx.viewing_offset);
+    }
     if (changed) {
         sg_app_ctx.need_refresh = TRUE;
     }
@@ -1107,6 +1551,8 @@ static void __example_sd_task(void *param)
         retry++;
         if (retry > 10) break; // Don't block forever
     }
+
+    progress_init();
 
     // Init App State
     memset(&sg_app_ctx, 0, sizeof(sg_app_ctx));

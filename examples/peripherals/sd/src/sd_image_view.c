@@ -10,6 +10,14 @@
 #include <stdlib.h>
 
 #include "tjpgd.h"
+#include "lodepng.h"
+
+static TUYA_FILE fopen_read_bin(const char *path)
+{
+    TUYA_FILE f = tkl_fopen(path, "rb");
+    if (f) return f;
+    return tkl_fopen(path, "r");
+}
 
 static uint16_t le16(const uint8_t *p)
 {
@@ -58,7 +66,7 @@ static void fit_aspect(int src_w, int src_h, int dst_w, int dst_h, int *out_w, i
 
 static int draw_bmp_1bit(const char *path, int x, int y, int w, int h)
 {
-    TUYA_FILE f = tkl_fopen(path, "r");
+    TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
 
     uint8_t hdr[54];
@@ -145,7 +153,7 @@ static int draw_bmp_1bit(const char *path, int x, int y, int w, int h)
 
 static int draw_bmp_24bit(const char *path, int x, int y, int w, int h)
 {
-    TUYA_FILE f = tkl_fopen(path, "r");
+    TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
 
     uint8_t hdr[54];
@@ -219,7 +227,7 @@ static int draw_bmp_24bit(const char *path, int x, int y, int w, int h)
 
 static int draw_bmp_any(const char *path, int x, int y, int w, int h)
 {
-    TUYA_FILE f = tkl_fopen(path, "r");
+    TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
     uint8_t hdr[54];
     if (read_exact(f, hdr, (int)sizeof(hdr)) != 0) {
@@ -287,7 +295,7 @@ static int tjpgd_outfunc(JDEC *jd, void *bitmap, JRECT *rect)
 
 static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
 {
-    TUYA_FILE f = tkl_fopen(path, "r");
+    TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
 
     JPG_DEV_T dev = {0};
@@ -329,6 +337,87 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
     return (r == JDR_OK) ? 0 : -1;
 }
 
+static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len)
+{
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (!path || !out_buf || !out_len) return -1;
+    int sz = tkl_fgetsize(path);
+    if (sz <= 0) return -1;
+    TUYA_FILE f = fopen_read_bin(path);
+    if (!f) return -1;
+    uint8_t *buf = (uint8_t *)tal_malloc((size_t)sz);
+    if (!buf) {
+        tkl_fclose(f);
+        return -1;
+    }
+    int rd = tkl_fread(buf, sz, f);
+    tkl_fclose(f);
+    if (rd != sz) {
+        tal_free(buf);
+        return -1;
+    }
+    *out_buf = buf;
+    *out_len = (size_t)sz;
+    return 0;
+}
+
+static uint8_t dither_thresh4(int x, int y)
+{
+    static const uint8_t m[16] = {
+        0,  8,  2, 10,
+        12, 4, 14, 6,
+        3, 11, 1,  9,
+        15, 7, 13, 5
+    };
+    uint8_t v = m[((y & 3) << 2) | (x & 3)];
+    return (uint8_t)(v * 16 + 8);
+}
+
+static int draw_png_1bit(const char *path, int x, int y, int w, int h)
+{
+    uint8_t *png = NULL;
+    size_t png_len = 0;
+    if (load_file_all(path, &png, &png_len) != 0) return -1;
+
+    unsigned char *rgba = NULL;
+    unsigned src_w = 0, src_h = 0;
+    unsigned err = lodepng_decode32(&rgba, &src_w, &src_h, (const unsigned char *)png, png_len);
+    tal_free(png);
+    if (err != 0 || !rgba || src_w == 0 || src_h == 0) {
+        if (rgba) tal_free(rgba);
+        return -1;
+    }
+
+    int draw_w, draw_h, off_x, off_y;
+    fit_aspect((int)src_w, (int)src_h, w, h, &draw_w, &draw_h, &off_x, &off_y);
+    if (draw_w <= 0 || draw_h <= 0) {
+        tal_free(rgba);
+        return -1;
+    }
+
+    for (int dy = 0; dy < draw_h; dy++) {
+        int sy = (int)((int64_t)dy * (int)src_h / draw_h);
+        const unsigned char *row = rgba + ((size_t)sy * (size_t)src_w * 4u);
+        for (int dx = 0; dx < draw_w; dx++) {
+            int sx = (int)((int64_t)dx * (int)src_w / draw_w);
+            const unsigned char *p = row + (size_t)sx * 4u;
+            uint8_t r = p[0];
+            uint8_t g = p[1];
+            uint8_t b = p[2];
+            uint8_t a = p[3];
+            uint8_t yy = luma_u8(r, g, b);
+            if (a < 16) yy = 255;
+            uint8_t thr = dither_thresh4(x + off_x + dx, y + off_y + dy);
+            uint8_t c = (yy < thr) ? BLACK : WHITE;
+            Paint_SetPixel((UWORD)(x + off_x + dx), (UWORD)(y + off_y + dy), c);
+        }
+    }
+
+    tal_free(rgba);
+    return 0;
+}
+
 static const char *ext_ptr(const char *path)
 {
     const char *dot = strrchr(path, '.');
@@ -354,5 +443,6 @@ int sd_draw_image_1bit(const char *path, int x, int y, int w, int h)
     const char *ext = ext_ptr(path);
     if (ext_ieq(ext, "bmp")) return draw_bmp_any(path, x, y, w, h);
     if (ext_ieq(ext, "jpg") || ext_ieq(ext, "jpeg")) return draw_jpg_1bit(path, x, y, w, h);
+    if (ext_ieq(ext, "png")) return draw_png_1bit(path, x, y, w, h);
     return -1;
 }
