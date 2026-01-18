@@ -15,9 +15,29 @@
 
 #include "lodepng.h"
 
-void* lodepng_malloc(size_t size) { return tal_malloc(size); }
-void* lodepng_realloc(void* ptr, size_t new_size) { return tal_realloc(ptr, new_size); }
-void lodepng_free(void* ptr) { tal_free(ptr); }
+void* lodepng_malloc(size_t size) {
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+  return tal_psram_malloc(size);
+#else
+  return tal_malloc(size);
+#endif
+}
+
+void* lodepng_realloc(void* ptr, size_t new_size) {
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+  return tal_psram_realloc(ptr, new_size);
+#else
+  return tal_realloc(ptr, new_size);
+#endif
+}
+
+void lodepng_free(void* ptr) {
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+  tal_psram_free(ptr);
+#else
+  tal_free(ptr);
+#endif
+}
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"

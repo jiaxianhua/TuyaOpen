@@ -129,6 +129,8 @@ static APP_CONTEXT_T sg_app_ctx;
 
 // Button configuration
 static TDL_BUTTON_HANDLE hdl_up, hdl_down, hdl_left, hdl_right, hdl_mid, hdl_set, hdl_rst;
+static volatile BOOL_T sg_btn_pending = FALSE;
+static char sg_btn_pending_name[8] = {0};
 
 /***********************************************************
 ***********************function define**********************
@@ -1350,11 +1352,8 @@ static void refresh_ui(void)
     EPD_4in26_Sleep();
 }
 
-static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
+static void handle_button_press(const char *name)
 {
-    if (event != TDL_BUTTON_PRESS_DOWN && event != TDL_BUTTON_LONG_PRESS_START) return;
-    
-    PR_NOTICE("Button %s pressed", name);
     BOOL_T changed = FALSE;
     BOOL_T save_progress_needed = FALSE;
 
@@ -1493,6 +1492,17 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
     }
 }
 
+static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
+{
+    (void)argc;
+    if (event != TDL_BUTTON_PRESS_DOWN && event != TDL_BUTTON_LONG_PRESS_START) return;
+    if (!name || !name[0]) return;
+    if (sg_btn_pending) return;
+    strncpy(sg_btn_pending_name, name, sizeof(sg_btn_pending_name) - 1);
+    sg_btn_pending_name[sizeof(sg_btn_pending_name) - 1] = 0;
+    sg_btn_pending = TRUE;
+}
+
 static void init_buttons(void)
 {
     TDL_BUTTON_CFG_T config = {
@@ -1567,6 +1577,14 @@ static void __example_sd_task(void *param)
     scan_files();
 
     while (1) {
+        if (sg_btn_pending) {
+            char btn[8];
+            strncpy(btn, sg_btn_pending_name, sizeof(btn) - 1);
+            btn[sizeof(btn) - 1] = 0;
+            sg_btn_pending = FALSE;
+            PR_NOTICE("Button %s pressed", btn);
+            handle_button_press(btn);
+        }
         if (sg_app_ctx.need_refresh) {
             sg_app_ctx.need_refresh = FALSE;
             refresh_ui();

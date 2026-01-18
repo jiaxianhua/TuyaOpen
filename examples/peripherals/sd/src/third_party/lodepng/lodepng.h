@@ -33,6 +33,10 @@ Copyright (c) 2005-2020 Lode Vandevenne
 extern "C" {
 #endif
 
+void* lodepng_malloc(size_t size);
+void* lodepng_realloc(void* ptr, size_t new_size);
+void lodepng_free(void* ptr);
+
 #ifdef LODEPNG_COMPILE_PNG
 typedef enum LodePNGColorType {
   LCT_GREY = 0,
@@ -189,4 +193,3 @@ unsigned lodepng_inspect_chunk(LodePNGState* state, size_t pos,
 #endif
 
 #endif
-

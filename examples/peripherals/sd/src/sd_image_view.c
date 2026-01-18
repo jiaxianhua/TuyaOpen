@@ -12,6 +12,25 @@
 #include "tjpgd.h"
 #include "lodepng.h"
 
+static void* img_malloc(size_t size)
+{
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+    return tal_psram_malloc(size);
+#else
+    return tal_malloc(size);
+#endif
+}
+
+static void img_free(void *ptr)
+{
+    if (!ptr) return;
+#if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM == 1)
+    tal_psram_free(ptr);
+#else
+    tal_free(ptr);
+#endif
+}
+
 static TUYA_FILE fopen_read_bin(const char *path)
 {
     TUYA_FILE f = tkl_fopen(path, "rb");
@@ -306,7 +325,7 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
     dev.h = h;
 
     size_t pool_sz = 96 * 1024;
-    void *pool = tal_malloc(pool_sz);
+    void *pool = img_malloc(pool_sz);
     if (!pool) {
         tkl_fclose(f);
         return -1;
@@ -315,7 +334,7 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
     JDEC jd = {0};
     JRESULT r = jd_prepare(&jd, tjpgd_infunc, pool, pool_sz, &dev);
     if (r != JDR_OK) {
-        tal_free(pool);
+        img_free(pool);
         tkl_fclose(f);
         return -1;
     }
@@ -325,14 +344,14 @@ static int draw_jpg_1bit(const char *path, int x, int y, int w, int h)
 
     fit_aspect(dev.src_w, dev.src_h, w, h, &dev.draw_w, &dev.draw_h, &dev.off_x, &dev.off_y);
     if (dev.draw_w <= 0 || dev.draw_h <= 0) {
-        tal_free(pool);
+        img_free(pool);
         tkl_fclose(f);
         return -1;
     }
 
     r = jd_decomp(&jd, tjpgd_outfunc, 0);
 
-    tal_free(pool);
+    img_free(pool);
     tkl_fclose(f);
     return (r == JDR_OK) ? 0 : -1;
 }
@@ -346,7 +365,7 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len)
     if (sz <= 0) return -1;
     TUYA_FILE f = fopen_read_bin(path);
     if (!f) return -1;
-    uint8_t *buf = (uint8_t *)tal_malloc((size_t)sz);
+    uint8_t *buf = (uint8_t *)img_malloc((size_t)sz);
     if (!buf) {
         tkl_fclose(f);
         return -1;
@@ -354,7 +373,7 @@ static int load_file_all(const char *path, uint8_t **out_buf, size_t *out_len)
     int rd = tkl_fread(buf, sz, f);
     tkl_fclose(f);
     if (rd != sz) {
-        tal_free(buf);
+        img_free(buf);
         return -1;
     }
     *out_buf = buf;
@@ -383,16 +402,16 @@ static int draw_png_1bit(const char *path, int x, int y, int w, int h)
     unsigned char *rgba = NULL;
     unsigned src_w = 0, src_h = 0;
     unsigned err = lodepng_decode32(&rgba, &src_w, &src_h, (const unsigned char *)png, png_len);
-    tal_free(png);
+    img_free(png);
     if (err != 0 || !rgba || src_w == 0 || src_h == 0) {
-        if (rgba) tal_free(rgba);
+        if (rgba) lodepng_free(rgba);
         return -1;
     }
 
     int draw_w, draw_h, off_x, off_y;
     fit_aspect((int)src_w, (int)src_h, w, h, &draw_w, &draw_h, &off_x, &off_y);
     if (draw_w <= 0 || draw_h <= 0) {
-        tal_free(rgba);
+        lodepng_free(rgba);
         return -1;
     }
 
@@ -414,7 +433,7 @@ static int draw_png_1bit(const char *path, int x, int y, int w, int h)
         }
     }
 
-    tal_free(rgba);
+    lodepng_free(rgba);
     return 0;
 }
 
