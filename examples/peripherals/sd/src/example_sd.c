@@ -18,6 +18,14 @@
 #include "tkl_gpio.h"
 #include "sd_image_view.h"
 #include "tal_time_service.h"
+#include "http_client_interface.h"
+#include "netmgr.h"
+#include "netconn_wifi.h"
+#include "tal_kv.h"
+#include "tuya_register_center.h"
+#include "cJSON.h"
+#include <time.h>
+#include <ctype.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +43,18 @@
 #define TASK_SD_SIZE     (1024 * 16)
 
 #define SDCARD_MOUNT_PATH "/sdcard"
+
+#define ENABLE_WIFI 1
+#define TIME_SERVER_URL  "www.baidu.com"
+#define TIME_SERVER_PATH "/"
+#define HTTP_REQUEST_TIMEOUT 8000
+#define DEFAULT_WIFI_SSID ""
+#define DEFAULT_WIFI_PSWD ""
+#define WIFI_CONFIG_FILE SDCARD_MOUNT_PATH "/wifi_config.json"
+
+static int g_time_synced = 0;
+static char g_wifi_ssid[64] = DEFAULT_WIFI_SSID;
+static char g_wifi_pswd[64] = DEFAULT_WIFI_PSWD;
 
 // GPIO pin definitions for 7-key
 #define GPIO_PIN_UP     TUYA_GPIO_NUM_27  // P27
@@ -112,6 +132,8 @@ typedef struct {
     INT64_T line_history[LINE_HISTORY_DEPTH];
     int line_hist_len;
     BOOL_T need_refresh;
+    BOOL_T partial_refresh;
+    BOOL_T first_frame;
 } APP_CONTEXT_T;
 
 typedef struct __attribute__((packed)) {
@@ -846,13 +868,13 @@ static const char *path_basename(const char *path)
     return p ? (p + 1) : path;
 }
 
-static void format_time_hhmm(char out[6])
+static void format_time_full(char out[32])
 {
     POSIX_TM_S tm;
     if (tal_time_get_local_time_custom(0, &tm) == OPRT_OK) {
-        snprintf(out, 6, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        snprintf(out, 32, "%04d-%02d-%02d %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
     } else {
-        snprintf(out, 6, "--:--");
+        snprintf(out, 32, "---- -- -- --:--:--");
     }
 }
 
@@ -1126,16 +1148,22 @@ static INT64_T advance_lines_in_file(const char *path, INT64_T start_off, int li
 
 static void refresh_ui(void)
 {
-    PR_NOTICE("Refreshing UI...");
+    // PR_NOTICE("Refreshing UI...");
     
     if(DEV_Module_Init() != 0) {
         PR_ERR("E-Paper DEV_Module_Init failed");
         return;
     }
 
-    EPD_4in26_Init();
-    // EPD_4in26_Clear(); // Avoid full clear every time to speed up? Or maybe needed for ghosting.
-    // For now, keep clear.
+    // Perform full clear first to ensure clean state
+    if (sg_app_ctx.first_frame) {
+        EPD_4in26_Init();
+        EPD_4in26_Clear();
+        DEV_Delay_ms(200);
+    }
+
+    // Use Fast Init for faster refresh speed (approx 1.5s for full, faster for partial)
+    EPD_4in26_Init_Fast();
     
     // Allocate memory
     UBYTE *BlackImage;
@@ -1152,10 +1180,58 @@ static void refresh_ui(void)
 
     if (sg_app_ctx.state == STATE_FILE_LIST) {
         // Draw Title
-        char title[96];
-        snprintf(title, sizeof(title), "%s (%d/%d)", sg_app_ctx.current_path, sg_app_ctx.current_page + 1, sg_app_ctx.total_pages);
-        Paint_DrawString_EN(10, 10, title, &Font24, BLACK, WHITE);
+        char time_str[32];
+        format_time_full(time_str);
+
+        char suffix[96];
+        snprintf(suffix, sizeof(suffix), " (%d/%d) %s", sg_app_ctx.current_page + 1, sg_app_ctx.total_pages, BRAND_GBK);
+
+        int max_px = (int)Paint.Width - 20;
+        int suffix_px = gbk_pixel_width(suffix);
+        int time_px = Font24.Width * strlen(time_str);
+        
+        int path_px_allow = max_px - suffix_px - time_px - 10; // 10px spacing
+        if (path_px_allow < 50) path_px_allow = 50; // Minimum path width
+        
+        char display_path[128];
+        int path_px = 0;
+        size_t keep_len = gbk_prefix_fit_px(sg_app_ctx.current_path, path_px_allow, &path_px);
+        
+        if (keep_len < strlen(sg_app_ctx.current_path)) {
+             char clipped[128];
+             int tilde_w = Font24.Width;
+             if (path_px_allow > tilde_w) {
+                 keep_len = gbk_prefix_fit_px(sg_app_ctx.current_path, path_px_allow - tilde_w, &path_px);
+                 if (keep_len >= sizeof(clipped) - 2) keep_len = sizeof(clipped) - 2;
+                 memcpy(clipped, sg_app_ctx.current_path, keep_len);
+                 clipped[keep_len] = '~';
+                 clipped[keep_len+1] = 0;
+             } else {
+                 strcpy(clipped, "~");
+             }
+             snprintf(display_path, sizeof(display_path), "%s", clipped);
+        } else {
+             snprintf(display_path, sizeof(display_path), "%s", sg_app_ctx.current_path);
+        }
+
+        // Draw Path and Suffix
+        char title[256];
+        snprintf(title, sizeof(title), "%s%s", display_path, suffix);
+        Paint_DrawString_CN_HZK24(10, 10, title, BLACK, WHITE);
+        
+        // Draw Time (Right Aligned)
+        int time_x = Paint.Width - 10 - time_px;
+        Paint_DrawString_EN(time_x, 10, time_str, &Font24, BLACK, WHITE);
+        
         Paint_DrawLine(10, 35, Paint.Width - 10, 35, BLACK, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+
+        // If partial refresh, only update the title bar area
+        if (sg_app_ctx.partial_refresh) {
+            EPD_4in26_Display_Part(BlackImage, 0, 0, EPD_4in26_WIDTH, 40);
+            tal_free(BlackImage);
+            EPD_4in26_Sleep();
+            return;
+        }
 
         int y_pos = 45;
         for (int i = 0; i < sg_app_ctx.item_count_in_page; i++) {
@@ -1218,8 +1294,16 @@ static void refresh_ui(void)
         int content_h = footer_y - content_y - 2;
         if (content_h < TEXT_LINE_HEIGHT) content_h = TEXT_LINE_HEIGHT;
 
+        char time_str[32];
+        format_time_full(time_str);
+        // Only use HH:MM part for preview header to save space
         char time_hhmm[6];
-        format_time_hhmm(time_hhmm);
+        if (strlen(time_str) >= 16) {
+            strncpy(time_hhmm, time_str + 11, 5);
+            time_hhmm[5] = 0;
+        } else {
+            strcpy(time_hhmm, "--:--");
+        }
 
         int percent = 0;
         if (sg_app_ctx.view_kind == VIEW_TEXT && sg_app_ctx.viewing_size > 0) {
@@ -1347,9 +1431,42 @@ static void refresh_ui(void)
         }
     }
 
-    EPD_4in26_Display(BlackImage);
-    tal_free(BlackImage);
-    EPD_4in26_Sleep();
+    if (sg_app_ctx.state == STATE_FILE_LIST) {
+        // ... (title drawing logic) ...
+        // If partial refresh, only update the title bar area
+        if (sg_app_ctx.partial_refresh) {
+            EPD_4in26_Display_Part(BlackImage, 0, 0, EPD_4in26_WIDTH, 40);
+            tal_free(BlackImage);
+            EPD_4in26_Sleep();
+            return;
+        }
+        
+        // Use Fast Display for faster full refresh
+         if (sg_app_ctx.first_frame) {
+             // First frame: use Base display to sync RAM
+             EPD_4in26_Display_Base(BlackImage);
+             sg_app_ctx.first_frame = FALSE;
+         } else {
+             // Subsequent frames: use Fast display
+             EPD_4in26_Display_Fast(BlackImage);
+         }
+         tal_free(BlackImage);
+         EPD_4in26_Sleep();
+         return;
+     } 
+     else if (sg_app_ctx.state == STATE_SHOW_FILE) {
+         // ... (preview drawing logic) ...
+         
+         // Use Fast Display for faster full refresh
+         if (sg_app_ctx.first_frame) {
+             EPD_4in26_Display_Base(BlackImage);
+             sg_app_ctx.first_frame = FALSE;
+         } else {
+             EPD_4in26_Display_Fast(BlackImage);
+         }
+         tal_free(BlackImage);
+         EPD_4in26_Sleep();
+     }
 }
 
 static void handle_button_press(const char *name)
@@ -1503,6 +1620,158 @@ static void button_cb(char *name, TDL_BUTTON_TOUCH_EVENT_E event, void *argc)
     sg_btn_pending = TRUE;
 }
 
+static int parse_http_date(const char *date_str, struct tm *tm_time)
+{
+    const char *p = strstr(date_str, "Date:");
+    if (p) {
+        p += 5;
+        while (*p == ' ') p++;
+    } else {
+        p = date_str;
+    }
+    
+    char month_str[4] = {0};
+    char weekday[4] = {0};
+    
+    int parsed = sscanf(p, "%3s, %d %3s %d %d:%d:%d",
+                       weekday,
+                       &tm_time->tm_mday,
+                       month_str,
+                       &tm_time->tm_year,
+                       &tm_time->tm_hour,
+                       &tm_time->tm_min,
+                       &tm_time->tm_sec);
+    
+    if (parsed != 7) {
+        PR_ERR("Failed to parse date string: %s", date_str);
+        return -1;
+    }
+    
+    const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    tm_time->tm_mon = -1;
+    for (int i = 0; i < 12; i++) {
+        if (strcmp(month_str, months[i]) == 0) {
+            tm_time->tm_mon = i;
+            break;
+        }
+    }
+    
+    if (tm_time->tm_mon == -1) {
+        PR_ERR("Invalid month: %s", month_str);
+        return -1;
+    }
+    
+    tm_time->tm_year -= 1900;
+    tm_time->tm_isdst = 0;
+    
+    return 0;
+}
+
+static int sync_time_from_http(void)
+{
+    int rt = OPRT_OK;
+    http_client_response_t http_response = {0};
+    
+    PR_NOTICE("Syncing time from %s...", TIME_SERVER_URL);
+    
+    http_client_header_t headers[] = {
+        {.key = "User-Agent", .value = "Mozilla/5.0"},
+        {.key = "Connection", .value = "close"}
+    };
+    
+    http_client_status_t http_status = http_client_request(
+        &(const http_client_request_t){
+            .cacert = NULL,
+            .cacert_len = 0,
+            .host = TIME_SERVER_URL,
+            .port = 80,
+            .method = "GET",
+            .path = TIME_SERVER_PATH,
+            .headers = headers,
+            .headers_count = 2,
+            .body = (const uint8_t *)"",
+            .body_length = 0,
+            .timeout_ms = HTTP_REQUEST_TIMEOUT
+        },
+        &http_response);
+    
+    if (HTTP_CLIENT_SUCCESS != http_status) {
+        PR_ERR("HTTP request failed: %d", http_status);
+        rt = OPRT_COM_ERROR;
+        goto cleanup;
+    }
+    
+    PR_NOTICE("HTTP request successful, status: %d", http_response.status_code);
+    
+    if (http_response.headers && http_response.headers_length > 0) {
+        char *headers_str = (char *)tal_malloc(http_response.headers_length + 1);
+        if (headers_str) {
+            memcpy(headers_str, http_response.headers, http_response.headers_length);
+            headers_str[http_response.headers_length] = '\0';
+            
+            char *date_line = strstr(headers_str, "Date:");
+            if (!date_line) {
+                date_line = strstr(headers_str, "date:");
+            }
+            
+            if (date_line) {
+                char *line_end = strstr(date_line, "\r\n");
+                if (line_end) {
+                    *line_end = '\0';
+                }
+                
+                PR_NOTICE("Found Date header: %s", date_line);
+                
+                struct tm tm_time = {0};
+                if (parse_http_date(date_line, &tm_time) == 0) {
+                    time_t server_time_gmt = mktime(&tm_time);
+                    time_t server_time_local = server_time_gmt + (8 * 3600);
+                    
+                    tal_time_set_posix(server_time_local, 0);
+                    g_time_synced = 1;
+                    
+                    PR_NOTICE("System time set to: %ld", server_time_local);
+                } else {
+                    PR_ERR("Failed to parse date header");
+                }
+            } else {
+                PR_WARN("No Date header found in response");
+            }
+            
+            tal_free(headers_str);
+        }
+    }
+    
+cleanup:
+    http_client_free(&http_response);
+    return rt;
+}
+
+static OPERATE_RET link_status_callback(void *data)
+{
+    static netmgr_status_e last_status = NETMGR_LINK_DOWN;
+    static int sync_attempted = 0;
+    netmgr_status_e status = (netmgr_status_e)data;
+    
+    if (status == last_status) {
+        return OPRT_OK;
+    }
+    
+    last_status = status;
+    
+    if (status == NETMGR_LINK_UP && !sync_attempted) {
+        PR_NOTICE("Network connected, syncing time...");
+        sync_attempted = 1;
+        tal_system_sleep(2000);
+        sync_time_from_http();
+    } else if (status == NETMGR_LINK_DOWN) {
+        PR_NOTICE("Network disconnected");
+    }
+    
+    return OPRT_OK;
+}
+
 static void init_buttons(void)
 {
     TDL_BUTTON_CFG_T config = {
@@ -1538,8 +1807,78 @@ static void init_buttons(void)
     }
 }
 
+static int read_wifi_config(void)
+{
+    TUYA_FILE f = tkl_fopen(WIFI_CONFIG_FILE, "r");
+    if (!f) {
+        PR_WARN("WiFi config file not found: %s, using defaults", WIFI_CONFIG_FILE);
+        return -1;
+    }
+    
+    int size = tkl_fgetsize(WIFI_CONFIG_FILE);
+    if (size <= 0) {
+        tkl_fclose(f);
+        return -1;
+    }
+    
+    char *json_str = (char *)tal_malloc(size + 1);
+    if (!json_str) {
+        tkl_fclose(f);
+        return -1;
+    }
+    
+    int rd = tkl_fread(json_str, size, f);
+    tkl_fclose(f);
+    
+    if (rd != size) {
+        tal_free(json_str);
+        return -1;
+    }
+    json_str[size] = 0;
+    
+    cJSON *root = cJSON_Parse(json_str);
+    tal_free(json_str);
+    
+    if (!root) {
+        PR_ERR("Failed to parse WiFi config JSON");
+        return -1;
+    }
+    
+    cJSON *ssid = cJSON_GetObjectItem(root, "ssid");
+    cJSON *password = cJSON_GetObjectItem(root, "password");
+    
+    if (cJSON_IsString(ssid) && (ssid->valuestring != NULL)) {
+        strncpy(g_wifi_ssid, ssid->valuestring, sizeof(g_wifi_ssid) - 1);
+        g_wifi_ssid[sizeof(g_wifi_ssid) - 1] = 0;
+        PR_NOTICE("Read SSID from config: %s", g_wifi_ssid);
+    }
+    
+    if (cJSON_IsString(password) && (password->valuestring != NULL)) {
+        strncpy(g_wifi_pswd, password->valuestring, sizeof(g_wifi_pswd) - 1);
+        g_wifi_pswd[sizeof(g_wifi_pswd) - 1] = 0;
+        PR_NOTICE("Read Password from config: %s", g_wifi_pswd);
+    }
+    
+    cJSON_Delete(root);
+    return 0;
+}
+
 static void __example_sd_task(void *param)
 {
+    // Initialize required services
+    PR_NOTICE("Initializing services...");
+    tal_kv_init(&(tal_kv_cfg_t){
+        .seed = "vmlkasdh93dlvlcy",
+        .key = "dflfuap134ddlduq",
+    });
+    tal_sw_timer_init();
+    tal_workq_init();
+    tuya_tls_init();
+    tuya_register_center_init();
+    
+    // Subscribe to network status changes
+    tal_event_subscribe(EVENT_LINK_STATUS_CHG, "sd_demo", link_status_callback, SUBSCRIBE_TYPE_NORMAL);
+
     // Pinmux config
     #if defined(EBABLE_EXAMPLE_SD_PINMUX) && (EBABLE_EXAMPLE_SD_PINMUX == 1)
     tkl_io_pinmux_config(EXAMPLE_SD_CLK_PIN, TUYA_SDIO_HOST_CLK);
@@ -1554,6 +1893,7 @@ static void __example_sd_task(void *param)
     init_buttons();
 
     // Mount SD
+    PR_NOTICE("Mounting SD card...");
     int retry = 0;
     while (tkl_fs_mount(SDCARD_MOUNT_PATH, DEV_SDCARD) != OPRT_OK) {
         PR_ERR("Mount SD card failed, retrying...");
@@ -1561,6 +1901,51 @@ static void __example_sd_task(void *param)
         retry++;
         if (retry > 10) break; // Don't block forever
     }
+    
+    // Read WiFi config from SD card
+    if (retry <= 10) {
+        read_wifi_config();
+    }
+
+    // Initialize network manager
+    PR_NOTICE("Initializing network...");
+    netmgr_type_e type = 0;
+#if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
+    type |= NETCONN_WIFI;
+#endif
+    netmgr_init(type);
+    
+#if defined(ENABLE_WIFI) && (ENABLE_WIFI == 1)
+    // Connect to WiFi
+    PR_NOTICE("Connecting to WiFi: %s", g_wifi_ssid);
+    netconn_wifi_info_t wifi_info = {0};
+    strncpy(wifi_info.ssid, g_wifi_ssid, sizeof(wifi_info.ssid) - 1);
+    strncpy(wifi_info.pswd, g_wifi_pswd, sizeof(wifi_info.pswd) - 1);
+    netmgr_conn_set(NETCONN_WIFI, NETCONN_CMD_SSID_PSWD, &wifi_info);
+    
+    // Wait for network connection and time sync
+    PR_NOTICE("Waiting for network connection and time sync...");
+    for (int i = 0; i < 15; i++) {  // Wait up to 15 seconds
+        tal_system_sleep(1000);
+        // Check if time has been synced
+        if (g_time_synced) {
+            PR_NOTICE("Time synced successfully!");
+            break;
+        }
+    }
+    
+    // If sync failed, set a default time
+    if (!g_time_synced) {
+        PR_WARN("Network sync timeout, setting default time");
+        struct tm default_time = {
+            .tm_year = 2025 - 1900, .tm_mon = 11, .tm_mday = 20,
+            .tm_hour = 21, .tm_min = 0, .tm_sec = 0, .tm_isdst = 0
+        };
+        time_t default_timestamp = mktime(&default_time);
+        tal_time_set_posix(default_timestamp, 0);
+        PR_NOTICE("Default time set");
+    }
+#endif
 
     progress_init();
 
@@ -1573,10 +1958,33 @@ static void __example_sd_task(void *param)
     sg_app_ctx.current_page = 0;
     sg_app_ctx.selected_index = 0;
     sg_app_ctx.need_refresh = TRUE;
+    sg_app_ctx.first_frame = TRUE;
 
     scan_files();
 
+    // unsigned int last_time_update = 0;
+    // char last_time_str[32] = {0};
+
     while (1) {
+        // Check if 1 second passed
+        // unsigned int now = tal_system_get_millisecond();
+        // if (now - last_time_update >= 10000) {
+        //     last_time_update = now;
+            
+        //     // Only refresh if time string actually changed (and we are synced or valid)
+        //     char current_time_str[32];
+        //     format_time_full(current_time_str);
+            
+        //     if (sg_app_ctx.state == STATE_FILE_LIST && strcmp(current_time_str, last_time_str) != 0) {
+        //         // Update last time
+        //         strncpy(last_time_str, current_time_str, sizeof(last_time_str) - 1);
+                
+        //         // Trigger partial refresh for time update
+        //         sg_app_ctx.partial_refresh = TRUE;
+        //         sg_app_ctx.need_refresh = TRUE;
+        //     }
+        // }
+
         if (sg_btn_pending) {
             char btn[8];
             strncpy(btn, sg_btn_pending_name, sizeof(btn) - 1);
@@ -1584,10 +1992,15 @@ static void __example_sd_task(void *param)
             sg_btn_pending = FALSE;
             PR_NOTICE("Button %s pressed", btn);
             handle_button_press(btn);
+            // Full refresh on button press
+            sg_app_ctx.partial_refresh = FALSE;
         }
         if (sg_app_ctx.need_refresh) {
-            sg_app_ctx.need_refresh = FALSE;
+            // If it was a partial refresh, reset flag after refreshing
+            // If it was a full refresh (button press), it will just do full refresh
             refresh_ui();
+            sg_app_ctx.need_refresh = FALSE;
+            sg_app_ctx.partial_refresh = FALSE;
         }
         tal_system_sleep(100);
     }
