@@ -21,6 +21,7 @@
 #include "net_time_sync.h"
 #include "baidu_netdisk.h"
 #include "qrcodegen.h"
+#include "epub_reader.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -109,6 +110,7 @@ typedef struct {
     int item_count_in_page;
     char current_path[256];
     char viewing_file[256]; // Full path of file being viewed
+    char viewing_data[256]; // Actual content path (epub may redirect)
     VIEW_KIND_E view_kind;
     UWORD rotate;
     VIEW_ENC_E viewing_enc;
@@ -800,6 +802,7 @@ static void open_item_for_view(void)
     if (it->is_dir) return;
     char full_path[256];
     path_join(full_path, sizeof(full_path), sg_app_ctx.current_path, it->name);
+    BOOL_T is_epub = ext_eq(file_ext(it->name), "epub");
 
     if (ext_eq(file_ext(it->name), "pdf")) {
         char pages_dir[256];
@@ -823,12 +826,25 @@ static void open_item_for_view(void)
 
     strncpy(sg_app_ctx.viewing_file, full_path, sizeof(sg_app_ctx.viewing_file) - 1);
     sg_app_ctx.viewing_file[sizeof(sg_app_ctx.viewing_file) - 1] = 0;
-    sg_app_ctx.viewing_size = tkl_fgetsize(sg_app_ctx.viewing_file);
+    sg_app_ctx.viewing_data[0] = 0;
     sg_app_ctx.page_hist_len = 0;
     sg_app_ctx.line_hist_len = 0;
     sg_app_ctx.view_kind = is_image_file(it->name) ? VIEW_IMAGE : VIEW_TEXT;
+    if (sg_app_ctx.view_kind == VIEW_TEXT && is_epub) {
+        char cache_path[256];
+        if (epub_extract_text(sg_app_ctx.viewing_file, PROGRESS_DIR, cache_path, sizeof(cache_path)) == 0) {
+            strncpy(sg_app_ctx.viewing_data, cache_path, sizeof(sg_app_ctx.viewing_data) - 1);
+            sg_app_ctx.viewing_data[sizeof(sg_app_ctx.viewing_data) - 1] = 0;
+        } else {
+            sg_app_ctx.viewing_data[0] = 0;
+        }
+    } else {
+        strncpy(sg_app_ctx.viewing_data, sg_app_ctx.viewing_file, sizeof(sg_app_ctx.viewing_data) - 1);
+        sg_app_ctx.viewing_data[sizeof(sg_app_ctx.viewing_data) - 1] = 0;
+    }
+    sg_app_ctx.viewing_size = sg_app_ctx.viewing_data[0] ? tkl_fgetsize(sg_app_ctx.viewing_data) : 0;
     INT64_T bom = 0;
-    sg_app_ctx.viewing_enc = (sg_app_ctx.view_kind == VIEW_TEXT) ? detect_file_encoding(sg_app_ctx.viewing_file, &bom) : VIEW_ENC_GBK;
+    sg_app_ctx.viewing_enc = (sg_app_ctx.view_kind == VIEW_TEXT && sg_app_ctx.viewing_data[0]) ? detect_file_encoding(sg_app_ctx.viewing_data, &bom) : VIEW_ENC_GBK;
     sg_app_ctx.viewing_offset = (sg_app_ctx.view_kind == VIEW_TEXT) ? bom : 0;
 
     UWORD saved_rot = 0;
@@ -1350,7 +1366,7 @@ static void refresh_ui(void)
         int lines_per_page = content_h / TEXT_LINE_HEIGHT;
         if (lines_per_page < 1) lines_per_page = 1;
         if (sg_app_ctx.view_kind == VIEW_TEXT) {
-            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
+            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_data, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
             INT64_T bytes_per_page = end_off - sg_app_ctx.viewing_offset;
             if (bytes_per_page <= 0) bytes_per_page = 1;
             if (sg_app_ctx.viewing_size > 0) {
@@ -1372,7 +1388,7 @@ static void refresh_ui(void)
             int y = content_y;
             int w = Paint.Width;
             int h = content_h;
-            if (display_image_1bit(sg_app_ctx.viewing_file, x, y, w, h) != 0) {
+            if (display_image_1bit(sg_app_ctx.viewing_data, x, y, w, h) != 0) {
                 Paint_DrawString_EN(10, 50, "Image decode failed/unsupported", &Font24, BLACK, WHITE);
             }
         } else {
@@ -1386,44 +1402,28 @@ static void refresh_ui(void)
                 snprintf(msg2, sizeof(msg2), "%s_pages/", bn ? bn : "file");
                 Paint_DrawString_EN(TEXT_MARGIN_X, content_y, msg1, &Font24, BLACK, WHITE);
                 Paint_DrawString_EN(TEXT_MARGIN_X, content_y + TEXT_LINE_HEIGHT, msg2, &Font24, BLACK, WHITE);
+            } else if (sg_app_ctx.viewing_data[0] == 0) {
+                Paint_DrawString_EN(TEXT_MARGIN_X, content_y, "EPUB extract failed", &Font24, BLACK, WHITE);
             } else {
-            INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
-            if (end_off < sg_app_ctx.viewing_offset) end_off = sg_app_ctx.viewing_offset;
-            INT64_T need = end_off - sg_app_ctx.viewing_offset;
-            if (need < 0) need = 0;
-            if (need > (INT64_T)FILE_READ_WINDOW) need = (INT64_T)FILE_READ_WINDOW;
+                INT64_T end_off = advance_lines_in_file(sg_app_ctx.viewing_data, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
+                if (end_off < sg_app_ctx.viewing_offset) end_off = sg_app_ctx.viewing_offset;
+                INT64_T need = end_off - sg_app_ctx.viewing_offset;
+                if (need < 0) need = 0;
+                if (need > (INT64_T)FILE_READ_WINDOW) need = (INT64_T)FILE_READ_WINDOW;
 
-            TUYA_FILE f = tkl_fopen(sg_app_ctx.viewing_file, "r");
-            if (f) {
-                if (tkl_fseek(f, sg_app_ctx.viewing_offset, SEEK_SET) == 0) {
-                    char *raw = (char *)tal_malloc((size_t)need + 1);
-                    if (raw) {
-                        int rd = tkl_fread(raw, (int)need, f);
-                        if (rd < 0) rd = 0;
-                        raw[rd] = 0;
-                        if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF8) {
-                            int gbk_len = rd * 2 + 2;
-                            char *gbk = (char *)tal_malloc(gbk_len);
-                            if (gbk) {
-                                int out_len = utf8_to_gbk_buf((uint8_t *)raw, rd, (uint8_t *)gbk, gbk_len - 1);
-                                if (out_len < 0) out_len = 0;
-                                gbk[out_len] = 0;
-                                Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
-                                tal_free(gbk);
-                            } else {
-                                Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
-                            }
-                        } else if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE || sg_app_ctx.viewing_enc == VIEW_ENC_UTF16BE) {
-                            int utf8_cap = rd * 2 + 4;
-                            uint8_t *utf8 = (uint8_t *)tal_malloc(utf8_cap);
-                            if (utf8) {
-                                int utf8_len = utf16_to_utf8_buf((uint8_t *)raw, rd, (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE) ? TRUE : FALSE, utf8, utf8_cap - 1);
-                                if (utf8_len < 0) utf8_len = 0;
-                                utf8[utf8_len] = 0;
-                                int gbk_len = utf8_len * 2 + 2;
+                TUYA_FILE f = tkl_fopen(sg_app_ctx.viewing_data, "r");
+                if (f) {
+                    if (tkl_fseek(f, sg_app_ctx.viewing_offset, SEEK_SET) == 0) {
+                        char *raw = (char *)tal_malloc((size_t)need + 1);
+                        if (raw) {
+                            int rd = tkl_fread(raw, (int)need, f);
+                            if (rd < 0) rd = 0;
+                            raw[rd] = 0;
+                            if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF8) {
+                                int gbk_len = rd * 2 + 2;
                                 char *gbk = (char *)tal_malloc(gbk_len);
                                 if (gbk) {
-                                    int out_len = utf8_to_gbk_buf(utf8, (size_t)utf8_len, (uint8_t *)gbk, (size_t)gbk_len - 1);
+                                    int out_len = utf8_to_gbk_buf((uint8_t *)raw, rd, (uint8_t *)gbk, gbk_len - 1);
                                     if (out_len < 0) out_len = 0;
                                     gbk[out_len] = 0;
                                     Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
@@ -1431,22 +1431,40 @@ static void refresh_ui(void)
                                 } else {
                                     Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
                                 }
-                                tal_free(utf8);
+                            } else if (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE || sg_app_ctx.viewing_enc == VIEW_ENC_UTF16BE) {
+                                int utf8_cap = rd * 2 + 4;
+                                uint8_t *utf8 = (uint8_t *)tal_malloc(utf8_cap);
+                                if (utf8) {
+                                    int utf8_len = utf16_to_utf8_buf((uint8_t *)raw, rd, (sg_app_ctx.viewing_enc == VIEW_ENC_UTF16LE) ? TRUE : FALSE, utf8, utf8_cap - 1);
+                                    if (utf8_len < 0) utf8_len = 0;
+                                    utf8[utf8_len] = 0;
+                                    int gbk_len = utf8_len * 2 + 2;
+                                    char *gbk = (char *)tal_malloc(gbk_len);
+                                    if (gbk) {
+                                        int out_len = utf8_to_gbk_buf(utf8, (size_t)utf8_len, (uint8_t *)gbk, (size_t)gbk_len - 1);
+                                        if (out_len < 0) out_len = 0;
+                                        gbk[out_len] = 0;
+                                        Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, gbk, BLACK, WHITE);
+                                        tal_free(gbk);
+                                    } else {
+                                        Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                                    }
+                                    tal_free(utf8);
+                                } else {
+                                    Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                                }
                             } else {
-                                Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
+                                Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, raw, BLACK, WHITE);
                             }
+                            tal_free(raw);
                         } else {
-                            Paint_DrawText_CN_HZK24_Adaptive(TEXT_MARGIN_X, content_y, max_w, avail_h, raw, BLACK, WHITE);
+                            Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
                         }
-                        tal_free(raw);
-                    } else {
-                        Paint_DrawString_EN(10, 50, "Memory Error", &Font24, BLACK, WHITE);
                     }
+                    tkl_fclose(f);
+                } else {
+                    Paint_DrawString_EN(10, 50, "Error opening file.", &Font24, BLACK, WHITE);
                 }
-                tkl_fclose(f);
-            } else {
-                Paint_DrawString_EN(10, 50, "Error opening file.", &Font24, BLACK, WHITE);
-            }
             }
 
             char status[96];
@@ -1746,7 +1764,7 @@ static void handle_button_press(const char *name, TDL_BUTTON_TOUCH_EVENT_E event
                 if (sg_app_ctx.line_hist_len < LINE_HISTORY_DEPTH) {
                     sg_app_ctx.line_history[sg_app_ctx.line_hist_len++] = sg_app_ctx.viewing_offset;
                 }
-                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, 1, sg_app_ctx.viewing_enc, max_w);
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_data, sg_app_ctx.viewing_offset, 1, sg_app_ctx.viewing_enc, max_w);
                 if (next > sg_app_ctx.viewing_offset) {
                     sg_app_ctx.viewing_offset = next;
                     save_progress_needed = TRUE;
@@ -1765,7 +1783,7 @@ static void handle_button_press(const char *name, TDL_BUTTON_TOUCH_EVENT_E event
                     sg_app_ctx.page_history[sg_app_ctx.page_hist_len++] = sg_app_ctx.viewing_offset;
                 }
                 sg_app_ctx.line_hist_len = 0;
-                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_file, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
+                INT64_T next = advance_lines_in_file(sg_app_ctx.viewing_data, sg_app_ctx.viewing_offset, lines_per_page, sg_app_ctx.viewing_enc, max_w);
                 if (next > sg_app_ctx.viewing_offset) {
                     sg_app_ctx.viewing_offset = next;
                     save_progress_needed = TRUE;

@@ -11,6 +11,7 @@
 主要功能：
 - SD 卡目录分页浏览
 - 文本文件自动换行与分页（保存阅读断点）
+- ePub 电子书解析（提取首篇内容为纯文本）
 - 图片（BMP/JPG/PNG）渲染为 1-bit 黑白图
 - 横竖屏旋转与按键控制（UP/DOWN/LEFT/RIGHT/MID/SET/RST）
 - 启动时尝试通过 HTTP Date 同步时间
@@ -60,6 +61,7 @@ E-Paper Reader (epaper_reader) is a lightweight demonstration app for Tuya T5 pl
 Key features:
 - SD card browsing with pagination
 - Text auto-wrap, pagination, and resume (progress saved)
+- ePub parsing (extracts the first content file as plain text)
 - Image rendering (BMP/JPG/PNG) converted to 1-bit for EPD
 - Rotation support and button controls (UP/DOWN/LEFT/RIGHT/MID/SET/RST)
 - Startup HTTP Date time synchronization
