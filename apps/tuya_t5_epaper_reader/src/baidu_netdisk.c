@@ -674,30 +674,28 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
     cur_url[4095] = 0;
 
     for (int redirects = 0; redirects < 5; redirects++) {
-        uint8_t *cacert = NULL;
-        uint16_t cacert_len = 0;
-        if (tuya_iotdns_query_domain_certs(cur_url, &cacert, &cacert_len) != OPRT_OK) {
-            tal_free(cur_url);
-            tal_free(path);
-            tal_free(next_url);
-            return OPRT_COM_ERROR;
-        }
-        if (!cacert || cacert_len == 0) {
-            if (cacert) tal_free(cacert);
-            tal_free(cur_url);
-            tal_free(path);
-            tal_free(next_url);
-            return OPRT_COM_ERROR;
-        }
-
         char scheme[8], host[256];
         uint16_t port = 0;
         if (parse_url(cur_url, scheme, sizeof(scheme), host, sizeof(host), &port, path, 4096) != OPRT_OK) {
-            tal_free(cacert);
             tal_free(cur_url);
             tal_free(path);
             tal_free(next_url);
             return OPRT_INVALID_PARM;
+        }
+
+        uint8_t *cacert = NULL;
+        uint16_t cacert_len = 0;
+        if (strcmp(scheme, "https") == 0) {
+            char url_for_cert[320];
+            snprintf(url_for_cert, sizeof(url_for_cert), "https://%s", host);
+            if (tuya_iotdns_query_domain_certs(url_for_cert, &cacert, &cacert_len) != OPRT_OK || !cacert ||
+                cacert_len == 0) {
+                if (cacert) tal_free(cacert);
+                tal_free(cur_url);
+                tal_free(path);
+                tal_free(next_url);
+                return OPRT_COM_ERROR;
+            }
         }
 
         TUYA_TRANSPORT_TYPE_E transport_type = (strcmp(scheme, "https") == 0) ? TRANSPORT_TYPE_TLS : TRANSPORT_TYPE_TCP;
@@ -779,6 +777,18 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
         req_hdrs.headersLen = (size_t)hdr_len;
 
         HTTPResponse_t resp = {0};
+        resp.pBuffer = tal_malloc(HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES + 1);
+        if (!resp.pBuffer) {
+            tal_free(req_hdrs.pBuffer);
+            tal_free(cacert);
+            tuya_transporter_close(network);
+            tuya_transporter_destroy(network);
+            tal_free(cur_url);
+            tal_free(path);
+            tal_free(next_url);
+            return OPRT_MALLOC_FAILED;
+        }
+        resp.bufferLen = HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES;
         HTTPStatus_t hs = HTTPClient_Send(&transport, &req_hdrs, NULL, 0, &resp,
                                           HTTP_SEND_DISABLE_CONTENT_LENGTH_FLAG | HTTP_SEND_DISABLE_RECV_BODY_FLAG);
         tal_free(req_hdrs.pBuffer);
@@ -786,6 +796,7 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         if (hs != HTTPSuccess) {
             PR_ERR("Download http send failed: %d", (int)hs);
+            tal_free(resp.pBuffer);
             tuya_transporter_close(network);
             tuya_transporter_destroy(network);
             tal_free(cur_url);
@@ -910,7 +921,6 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
                 if (pct > 100) pct = 100;
                 if (pct != sg_progress_percent) {
                     sg_progress_percent = pct;
-                    sg_need_refresh = TRUE;
                 }
             }
         }
