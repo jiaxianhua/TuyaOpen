@@ -409,6 +409,7 @@ static void Paint_DrawText_CN_HZK24_Adaptive(UWORD Xstart, UWORD Ystart, UWORD W
 
 static void   path_join(char *out, size_t out_len, const char *base, const char *name);
 static size_t gbk_prefix_fit_px(const char *s, int max_px, int *out_px);
+static BOOL_T is_epub_cache_dir(const char *path);
 
 static void format_size_human(char *out, size_t out_len, INT64_T size)
 {
