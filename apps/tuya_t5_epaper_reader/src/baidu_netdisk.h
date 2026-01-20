@@ -19,30 +19,31 @@ typedef enum {
 } BDNDK_WORK_E;
 
 typedef struct {
-    char name[128];
-    char path[256];
-    char fsid[64];
+    char    name[128];
+    char    path[256];
+    char    fsid[64];
     INT64_T size;
-    BOOL_T is_dir;
+    BOOL_T  is_dir;
+    BOOL_T  downloaded;
 } BDNDK_FILE_T;
 
 OPERATE_RET bdndk_start(void);
-void bdndk_stop(void);
+void        bdndk_stop(void);
 
 void bdndk_storage_set(BOOL_T ready, const char *save_dir);
 
 BDNDK_VIEW_E bdndk_view_get(void);
 BDNDK_WORK_E bdndk_work_get(void);
-int bdndk_work_progress_get(int *out_percent);
-BOOL_T bdndk_need_refresh_fetch(void);
+int          bdndk_work_progress_get(int *out_percent);
+BOOL_T       bdndk_need_refresh_fetch(void);
 
 void bdndk_message_get(char *out, size_t out_len);
 
 BOOL_T bdndk_auth_info_get(char *out_qrcode_url, size_t qrcode_len, char *out_verify_url, size_t verify_len,
                            char *out_user_code, size_t user_code_len);
 
-int bdndk_list_count(void);
-int bdndk_list_copy(BDNDK_FILE_T *out, int max);
+int    bdndk_list_count(void);
+int    bdndk_list_copy(BDNDK_FILE_T *out, int max);
 BOOL_T bdndk_list_get(int index, BDNDK_FILE_T *out);
 BOOL_T bdndk_detail_get(BDNDK_FILE_T *out);
 

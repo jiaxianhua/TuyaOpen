@@ -62,50 +62,63 @@ typedef struct {
     char user_code[16];
     char qrcode_url[256];
     char verification_url[128];
-    int expires_in;
-    int interval;
+    int  expires_in;
+    int  interval;
 } bdndk_device_auth_t;
 
 typedef struct {
-    char access_token[512];
-    char refresh_token[512];
-    int expires_in;
+    char      access_token[512];
+    char      refresh_token[512];
+    int       expires_in;
     long long save_time;
 } bdndk_token_t;
 
-static THREAD_HANDLE sg_worker_thrd;
-static volatile BOOL_T sg_running = FALSE;
+static THREAD_HANDLE   sg_worker_thrd;
+static volatile BOOL_T sg_running      = FALSE;
 static volatile BOOL_T sg_need_refresh = FALSE;
 
-static volatile BDNDK_VIEW_E sg_view = BDNDK_VIEW_AUTH;
-static volatile BDNDK_WORK_E sg_work = BDNDK_WORK_IDLE;
-static volatile int sg_progress_percent = -1;
+static volatile BDNDK_VIEW_E sg_view             = BDNDK_VIEW_AUTH;
+static volatile BDNDK_WORK_E sg_work             = BDNDK_WORK_IDLE;
+static volatile int          sg_progress_percent = -1;
 
 static bdndk_device_auth_t sg_auth;
-static bdndk_token_t sg_token;
+static bdndk_token_t       sg_token;
 
 static BDNDK_FILE_T sg_list[120];
-static int sg_list_count = 0;
+static int          sg_list_count = 0;
 
-static int sg_selected_index = -1;
+static int          sg_selected_index = -1;
 static BDNDK_FILE_T sg_detail;
 
-static volatile int sg_pending_download_index = -1;
-static char sg_last_msg[128];
+static volatile int    sg_pending_download_index = -1;
+static char            sg_last_msg[128];
 static volatile BOOL_T sg_storage_ready = FALSE;
-static char sg_save_dir[160] = BDNDK_SDCARD_MOUNT_PATH "/TuyaT5AI";
+static char            sg_save_dir[160] = BDNDK_SDCARD_MOUNT_PATH "/TuyaT5AI";
+
+static BOOL_T file_exists_in_dir(const char *dir, const char *name)
+{
+    if (!dir || !name || !dir[0] || !name[0])
+        return FALSE;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    BOOL_T exist = FALSE;
+    if (tkl_fs_is_exist(path, &exist) == 0 && exist)
+        return TRUE;
+    return FALSE;
+}
 
 static void set_msg(const char *s)
 {
-    if (!s) s = "";
+    if (!s)
+        s = "";
     strncpy(sg_last_msg, s, sizeof(sg_last_msg) - 1);
     sg_last_msg[sizeof(sg_last_msg) - 1] = 0;
-    sg_need_refresh = TRUE;
+    sg_need_refresh                      = TRUE;
 }
 
 BOOL_T bdndk_need_refresh_fetch(void)
 {
-    BOOL_T v = sg_need_refresh;
+    BOOL_T v        = sg_need_refresh;
     sg_need_refresh = FALSE;
     return v;
 }
@@ -130,7 +143,8 @@ int bdndk_work_progress_get(int *out_percent)
 
 void bdndk_message_get(char *out, size_t out_len)
 {
-    if (!out || out_len == 0) return;
+    if (!out || out_len == 0)
+        return;
     strncpy(out, sg_last_msg, out_len - 1);
     out[out_len - 1] = 0;
 }
@@ -160,25 +174,31 @@ int bdndk_list_count(void)
 
 int bdndk_list_copy(BDNDK_FILE_T *out, int max)
 {
-    if (!out || max <= 0) return 0;
+    if (!out || max <= 0)
+        return 0;
     int n = sg_list_count;
-    if (n > max) n = max;
+    if (n > max)
+        n = max;
     memcpy(out, sg_list, sizeof(BDNDK_FILE_T) * (size_t)n);
     return n;
 }
 
 BOOL_T bdndk_list_get(int index, BDNDK_FILE_T *out)
 {
-    if (!out) return FALSE;
-    if (index < 0 || index >= sg_list_count) return FALSE;
+    if (!out)
+        return FALSE;
+    if (index < 0 || index >= sg_list_count)
+        return FALSE;
     memcpy(out, &sg_list[index], sizeof(BDNDK_FILE_T));
     return TRUE;
 }
 
 BOOL_T bdndk_detail_get(BDNDK_FILE_T *out)
 {
-    if (!out) return FALSE;
-    if (sg_selected_index < 0) return FALSE;
+    if (!out)
+        return FALSE;
+    if (sg_selected_index < 0)
+        return FALSE;
     memcpy(out, &sg_detail, sizeof(BDNDK_FILE_T));
     return TRUE;
 }
@@ -190,7 +210,7 @@ OPERATE_RET bdndk_select_detail(int index)
     }
     sg_selected_index = index;
     memcpy(&sg_detail, &sg_list[index], sizeof(BDNDK_FILE_T));
-    sg_view = BDNDK_VIEW_DETAIL;
+    sg_view         = BDNDK_VIEW_DETAIL;
     sg_need_refresh = TRUE;
     return OPRT_OK;
 }
@@ -203,31 +223,34 @@ OPERATE_RET bdndk_request_download(int index, const char *save_dir)
     }
     if (!sg_storage_ready) {
         set_msg("SD not mounted");
-        sg_view = BDNDK_VIEW_MSG;
+        sg_view         = BDNDK_VIEW_MSG;
         sg_need_refresh = TRUE;
         return OPRT_COM_ERROR;
     }
     if (sg_list[index].is_dir) {
         set_msg("Directory can't download");
-        sg_view = BDNDK_VIEW_MSG;
+        sg_view         = BDNDK_VIEW_MSG;
         sg_need_refresh = TRUE;
         return OPRT_NOT_SUPPORTED;
     }
     sg_pending_download_index = index;
-    sg_view = BDNDK_VIEW_MSG;
-    sg_need_refresh = TRUE;
     return OPRT_OK;
 }
 
 static BOOL_T token_is_valid(const bdndk_token_t *t)
 {
-    if (!t) return FALSE;
-    if (t->save_time == 0 || t->expires_in <= 0) return FALSE;
-    if (t->access_token[0] == 0) return FALSE;
-    long long now = (long long)tal_time_get_posix();
+    if (!t)
+        return FALSE;
+    if (t->save_time == 0 || t->expires_in <= 0)
+        return FALSE;
+    if (t->access_token[0] == 0)
+        return FALSE;
+    long long now  = (long long)tal_time_get_posix();
     long long used = now - t->save_time;
-    if (used < 0) used = 0;
-    if (used < (long long)t->expires_in - 3600) return TRUE;
+    if (used < 0)
+        used = 0;
+    if (used < (long long)t->expires_in - 3600)
+        return TRUE;
     return FALSE;
 }
 
@@ -238,21 +261,27 @@ static OPERATE_RET ensure_token_dir(void)
         return OPRT_OK;
     }
     int mk = tkl_fs_mkdir(BDNDK_TOKEN_DIR);
-    if (mk == 0) return OPRT_OK;
-    if (tkl_fs_is_exist(BDNDK_TOKEN_DIR, &exist) == 0 && exist) return OPRT_OK;
+    if (mk == 0)
+        return OPRT_OK;
+    if (tkl_fs_is_exist(BDNDK_TOKEN_DIR, &exist) == 0 && exist)
+        return OPRT_OK;
     return OPRT_COM_ERROR;
 }
 
 static OPERATE_RET token_save(const bdndk_token_t *t)
 {
-    if (!t) return OPRT_INVALID_PARM;
-    if (ensure_token_dir() != OPRT_OK) return OPRT_COM_ERROR;
+    if (!t)
+        return OPRT_INVALID_PARM;
+    if (ensure_token_dir() != OPRT_OK)
+        return OPRT_COM_ERROR;
     TUYA_FILE f = tkl_fopen(BDNDK_TOKEN_FILE, "w");
-    if (!f) return OPRT_COM_ERROR;
+    if (!f)
+        return OPRT_COM_ERROR;
     char buf[1200];
-    int n = snprintf(buf, sizeof(buf), "access_token=%s\nrefresh_token=%s\nexpires_in=%d\nsave_time=%lld\n",
-                     t->access_token, t->refresh_token, t->expires_in, t->save_time);
-    if (n < 0) n = 0;
+    int  n = snprintf(buf, sizeof(buf), "access_token=%s\nrefresh_token=%s\nexpires_in=%d\nsave_time=%lld\n",
+                      t->access_token, t->refresh_token, t->expires_in, t->save_time);
+    if (n < 0)
+        n = 0;
     tkl_fwrite(buf, n, f);
     tkl_fclose(f);
     return OPRT_OK;
@@ -260,10 +289,12 @@ static OPERATE_RET token_save(const bdndk_token_t *t)
 
 static OPERATE_RET token_load(bdndk_token_t *t)
 {
-    if (!t) return OPRT_INVALID_PARM;
+    if (!t)
+        return OPRT_INVALID_PARM;
     memset(t, 0, sizeof(*t));
     TUYA_FILE f = tkl_fopen(BDNDK_TOKEN_FILE, "r");
-    if (!f) return OPRT_NOT_FOUND;
+    if (!f)
+        return OPRT_NOT_FOUND;
     char line[1024];
     while (tkl_fgets(line, sizeof(line), f)) {
         if (strncmp(line, "access_token=", 13) == 0) {
@@ -284,20 +315,22 @@ static OPERATE_RET token_load(bdndk_token_t *t)
 
 static int url_encode(const char *src, char *dst, int dst_len)
 {
-    if (!src || !dst || dst_len <= 0) return -1;
+    if (!src || !dst || dst_len <= 0)
+        return -1;
     int di = 0;
     for (int i = 0; src[i] && di < dst_len - 1; i++) {
-        uint8_t c = (uint8_t)src[i];
-        BOOL_T unreserved = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+        uint8_t c          = (uint8_t)src[i];
+        BOOL_T  unreserved = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
                             c == '_' || c == '.' || c == '~' || c == '/' || c == ':';
         if (unreserved) {
             dst[di++] = (char)c;
         } else {
-            if (di + 3 >= dst_len) break;
+            if (di + 3 >= dst_len)
+                break;
             static const char hex[] = "0123456789ABCDEF";
-            dst[di++] = '%';
-            dst[di++] = hex[(c >> 4) & 0xF];
-            dst[di++] = hex[c & 0xF];
+            dst[di++]               = '%';
+            dst[di++]               = hex[(c >> 4) & 0xF];
+            dst[di++]               = hex[c & 0xF];
         }
     }
     dst[di] = 0;
@@ -306,32 +339,39 @@ static int url_encode(const char *src, char *dst, int dst_len)
 
 static void trim_url_copy(char *dst, size_t dst_len, const char *src)
 {
-    if (!dst || dst_len == 0) return;
+    if (!dst || dst_len == 0)
+        return;
     dst[0] = 0;
-    if (!src) return;
-    while (*src == ' ' || *src == '\t' || *src == '\r' || *src == '\n' || *src == '`') src++;
+    if (!src)
+        return;
+    while (*src == ' ' || *src == '\t' || *src == '\r' || *src == '\n' || *src == '`')
+        src++;
     size_t n = strlen(src);
     while (n > 0 &&
            (src[n - 1] == ' ' || src[n - 1] == '\t' || src[n - 1] == '\r' || src[n - 1] == '\n' || src[n - 1] == '`')) {
         n--;
     }
-    if (n >= dst_len) n = dst_len - 1;
+    if (n >= dst_len)
+        n = dst_len - 1;
     memcpy(dst, src, n);
     dst[n] = 0;
 }
 
 static void url_unescape_json_inplace(char *s)
 {
-    if (!s) return;
+    if (!s)
+        return;
 
     const char *p = s;
-    char *w = s;
+    char       *w = s;
     while (*p) {
         if (p[0] == '\\' && p[1] == 'u' && p[2] == '0' && p[3] == '0') {
             if ((p[4] == '2' || p[4] == '3') && (p[5] == '6' || p[5] == 'd' || p[5] == 'D')) {
                 char c = 0;
-                if (p[4] == '2' && p[5] == '6') c = '&';
-                if (p[4] == '3' && (p[5] == 'd' || p[5] == 'D')) c = '=';
+                if (p[4] == '2' && p[5] == '6')
+                    c = '&';
+                if (p[4] == '3' && (p[5] == 'd' || p[5] == 'D'))
+                    c = '=';
                 if (c) {
                     *w++ = c;
                     p += 6;
@@ -351,17 +391,19 @@ static void url_unescape_json_inplace(char *s)
 
 static OPERATE_RET https_get_json(const char *host, const char *path, const char *ua, char **out_body)
 {
-    if (!host || !path || !out_body) return OPRT_INVALID_PARM;
-    *out_body = NULL;
-    uint8_t *cacert = NULL;
+    if (!host || !path || !out_body)
+        return OPRT_INVALID_PARM;
+    *out_body           = NULL;
+    uint8_t *cacert     = NULL;
     uint16_t cacert_len = 0;
-    char url_for_cert[256];
+    char     url_for_cert[256];
     snprintf(url_for_cert, sizeof(url_for_cert), "https://%s", host);
     if (tuya_iotdns_query_domain_certs(url_for_cert, &cacert, &cacert_len) != OPRT_OK) {
         return OPRT_COM_ERROR;
     }
     if (!cacert || cacert_len == 0) {
-        if (cacert) tal_free(cacert);
+        if (cacert)
+            tal_free(cacert);
         return OPRT_COM_ERROR;
     }
 
@@ -370,20 +412,21 @@ static OPERATE_RET https_get_json(const char *host, const char *path, const char
         {.key = "Connection", .value = "close"},
     };
     http_client_response_t resp = {0};
-    http_client_status_t st = http_client_request(&(const http_client_request_t){
-                                                      .cacert = cacert,
-                                                      .cacert_len = cacert_len,
-                                                      .host = host,
-                                                      .port = 443,
-                                                      .method = "GET",
-                                                      .path = path,
-                                                      .headers = headers,
-                                                      .headers_count = 2,
-                                                      .body = NULL,
-                                                      .body_length = 0,
-                                                      .timeout_ms = BDNDK_HTTP_TIMEOUT_MS,
-                                                  },
-                                                  &resp);
+    http_client_status_t   st   = http_client_request(
+        &(const http_client_request_t){
+                .cacert        = cacert,
+                .cacert_len    = cacert_len,
+                .host          = host,
+                .port          = 443,
+                .method        = "GET",
+                .path          = path,
+                .headers       = headers,
+                .headers_count = 2,
+                .body          = NULL,
+                .body_length   = 0,
+                .timeout_ms    = BDNDK_HTTP_TIMEOUT_MS,
+        },
+        &resp);
     tal_free(cacert);
     if (st != HTTP_CLIENT_SUCCESS) {
         http_client_free(&resp);
@@ -407,26 +450,29 @@ static OPERATE_RET https_get_json(const char *host, const char *path, const char
 
 static OPERATE_RET get_device_auth(bdndk_device_auth_t *out)
 {
-    if (!out) return OPRT_INVALID_PARM;
+    if (!out)
+        return OPRT_INVALID_PARM;
     memset(out, 0, sizeof(*out));
     char path[768];
-    snprintf(path, sizeof(path),
-             "/oauth/2.0/device/code?response_type=device_code&client_id=%s&scope=%s", BDNDK_APP_KEY, BDNDK_SCOPE);
+    snprintf(path, sizeof(path), "/oauth/2.0/device/code?response_type=device_code&client_id=%s&scope=%s",
+             BDNDK_APP_KEY, BDNDK_SCOPE);
 
-    char *body = NULL;
-    OPERATE_RET rt = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
-    if (rt != OPRT_OK) return rt;
+    char       *body = NULL;
+    OPERATE_RET rt   = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
+    if (rt != OPRT_OK)
+        return rt;
 
     cJSON *root = cJSON_Parse(body);
     tal_free(body);
-    if (!root) return OPRT_CJSON_PARSE_ERR;
+    if (!root)
+        return OPRT_CJSON_PARSE_ERR;
 
     cJSON *d_code = cJSON_GetObjectItem(root, "device_code");
     cJSON *u_code = cJSON_GetObjectItem(root, "user_code");
     cJSON *qr_url = cJSON_GetObjectItem(root, "qrcode_url");
-    cJSON *v_url = cJSON_GetObjectItem(root, "verification_url");
-    cJSON *exp = cJSON_GetObjectItem(root, "expires_in");
-    cJSON *inter = cJSON_GetObjectItem(root, "interval");
+    cJSON *v_url  = cJSON_GetObjectItem(root, "verification_url");
+    cJSON *exp    = cJSON_GetObjectItem(root, "expires_in");
+    cJSON *inter  = cJSON_GetObjectItem(root, "interval");
 
     if (!cJSON_IsString(d_code) || !cJSON_IsString(u_code) || !cJSON_IsString(qr_url) || !cJSON_IsString(v_url) ||
         !cJSON_IsNumber(exp) || !cJSON_IsNumber(inter)) {
@@ -439,27 +485,28 @@ static OPERATE_RET get_device_auth(bdndk_device_auth_t *out)
     strncpy(out->qrcode_url, qr_url->valuestring, sizeof(out->qrcode_url) - 1);
     strncpy(out->verification_url, v_url->valuestring, sizeof(out->verification_url) - 1);
     out->expires_in = exp->valueint;
-    out->interval = inter->valueint;
+    out->interval   = inter->valueint;
     cJSON_Delete(root);
     return OPRT_OK;
 }
 
 static OPERATE_RET poll_access_token(const bdndk_device_auth_t *auth, bdndk_token_t *out)
 {
-    if (!auth || !out) return OPRT_INVALID_PARM;
+    if (!auth || !out)
+        return OPRT_INVALID_PARM;
     memset(out, 0, sizeof(*out));
 
     int max_attempts = (auth->interval > 0) ? (auth->expires_in / auth->interval) : 0;
-    if (max_attempts <= 0) max_attempts = 60;
+    if (max_attempts <= 0)
+        max_attempts = 60;
 
     for (int i = 0; sg_running && i < max_attempts; i++) {
         char path[1024];
-        snprintf(path, sizeof(path),
-                 "/oauth/2.0/token?grant_type=device_token&code=%s&client_id=%s&client_secret=%s", auth->device_code,
-                 BDNDK_APP_KEY, BDNDK_APP_SECRET);
+        snprintf(path, sizeof(path), "/oauth/2.0/token?grant_type=device_token&code=%s&client_id=%s&client_secret=%s",
+                 auth->device_code, BDNDK_APP_KEY, BDNDK_APP_SECRET);
 
-        char *body = NULL;
-        OPERATE_RET rt = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
+        char       *body = NULL;
+        OPERATE_RET rt   = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
         if (rt != OPRT_OK) {
             set_msg("Auth: net error");
             tal_system_sleep(auth->interval * 1000);
@@ -486,9 +533,9 @@ static OPERATE_RET poll_access_token(const bdndk_device_auth_t *auth, bdndk_toke
             return OPRT_COM_ERROR;
         }
 
-        cJSON *at = cJSON_GetObjectItem(root, "access_token");
+        cJSON *at   = cJSON_GetObjectItem(root, "access_token");
         cJSON *rtok = cJSON_GetObjectItem(root, "refresh_token");
-        cJSON *exp = cJSON_GetObjectItem(root, "expires_in");
+        cJSON *exp  = cJSON_GetObjectItem(root, "expires_in");
         if (!cJSON_IsString(at) || !cJSON_IsString(rtok) || !cJSON_IsNumber(exp)) {
             cJSON_Delete(root);
             return OPRT_COM_ERROR;
@@ -497,7 +544,7 @@ static OPERATE_RET poll_access_token(const bdndk_device_auth_t *auth, bdndk_toke
         strncpy(out->access_token, at->valuestring, sizeof(out->access_token) - 1);
         strncpy(out->refresh_token, rtok->valuestring, sizeof(out->refresh_token) - 1);
         out->expires_in = exp->valueint;
-        out->save_time = (long long)tal_time_get_posix();
+        out->save_time  = (long long)tal_time_get_posix();
         cJSON_Delete(root);
         return OPRT_OK;
     }
@@ -506,31 +553,35 @@ static OPERATE_RET poll_access_token(const bdndk_device_auth_t *auth, bdndk_toke
 
 static OPERATE_RET refresh_access_token(const bdndk_token_t *old_t, bdndk_token_t *out)
 {
-    if (!old_t || !out) return OPRT_INVALID_PARM;
-    if (old_t->refresh_token[0] == 0) return OPRT_NOT_FOUND;
+    if (!old_t || !out)
+        return OPRT_INVALID_PARM;
+    if (old_t->refresh_token[0] == 0)
+        return OPRT_NOT_FOUND;
 
-    size_t cap = 2048;
-    char *path = (char *)tal_malloc(cap);
-    if (!path) return OPRT_MALLOC_FAILED;
-    snprintf(path, cap,
-             "/oauth/2.0/token?grant_type=refresh_token&refresh_token=%s&client_id=%s&client_secret=%s",
+    size_t cap  = 2048;
+    char  *path = (char *)tal_malloc(cap);
+    if (!path)
+        return OPRT_MALLOC_FAILED;
+    snprintf(path, cap, "/oauth/2.0/token?grant_type=refresh_token&refresh_token=%s&client_id=%s&client_secret=%s",
              old_t->refresh_token, BDNDK_APP_KEY, BDNDK_APP_SECRET);
-    char *body = NULL;
-    OPERATE_RET rt = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
+    char       *body = NULL;
+    OPERATE_RET rt   = https_get_json("openapi.baidu.com", path, "pan.baidu.com", &body);
     tal_free(path);
-    if (rt != OPRT_OK) return rt;
+    if (rt != OPRT_OK)
+        return rt;
 
     cJSON *root = cJSON_Parse(body);
     tal_free(body);
-    if (!root) return OPRT_CJSON_PARSE_ERR;
+    if (!root)
+        return OPRT_CJSON_PARSE_ERR;
     cJSON *err = cJSON_GetObjectItem(root, "error");
     if (cJSON_IsString(err)) {
         cJSON_Delete(root);
         return OPRT_COM_ERROR;
     }
-    cJSON *at = cJSON_GetObjectItem(root, "access_token");
+    cJSON *at   = cJSON_GetObjectItem(root, "access_token");
     cJSON *rtok = cJSON_GetObjectItem(root, "refresh_token");
-    cJSON *exp = cJSON_GetObjectItem(root, "expires_in");
+    cJSON *exp  = cJSON_GetObjectItem(root, "expires_in");
     if (!cJSON_IsString(at) || !cJSON_IsString(rtok) || !cJSON_IsNumber(exp)) {
         cJSON_Delete(root);
         return OPRT_COM_ERROR;
@@ -539,32 +590,36 @@ static OPERATE_RET refresh_access_token(const bdndk_token_t *old_t, bdndk_token_
     strncpy(out->access_token, at->valuestring, sizeof(out->access_token) - 1);
     strncpy(out->refresh_token, rtok->valuestring, sizeof(out->refresh_token) - 1);
     out->expires_in = exp->valueint;
-    out->save_time = (long long)tal_time_get_posix();
+    out->save_time  = (long long)tal_time_get_posix();
     cJSON_Delete(root);
     return OPRT_OK;
 }
 
 static OPERATE_RET get_baidu_list(const bdndk_token_t *t)
 {
-    if (!t) return OPRT_INVALID_PARM;
+    if (!t)
+        return OPRT_INVALID_PARM;
 
     char enc_dir[700];
     url_encode(BDNDK_TARGET_DIR, enc_dir, sizeof(enc_dir));
-    size_t cap = 2400;
-    char *path = (char *)tal_malloc(cap);
-    if (!path) return OPRT_MALLOC_FAILED;
+    size_t cap  = 2400;
+    char  *path = (char *)tal_malloc(cap);
+    if (!path)
+        return OPRT_MALLOC_FAILED;
     snprintf(path, cap,
              "/rest/2.0/xpan/file?method=list&access_token=%s&dir=%s&order=time&desc=1&start=0&limit=%d&folder=0",
              t->access_token, enc_dir, (int)(sizeof(sg_list) / sizeof(sg_list[0])));
 
-    char *body = NULL;
-    OPERATE_RET rt = https_get_json("pan.baidu.com", path, "pan.baidu.com", &body);
+    char       *body = NULL;
+    OPERATE_RET rt   = https_get_json("pan.baidu.com", path, "pan.baidu.com", &body);
     tal_free(path);
-    if (rt != OPRT_OK) return rt;
+    if (rt != OPRT_OK)
+        return rt;
 
     cJSON *root = cJSON_Parse(body);
     tal_free(body);
-    if (!root) return OPRT_CJSON_PARSE_ERR;
+    if (!root)
+        return OPRT_CJSON_PARSE_ERR;
 
     cJSON *errno_item = cJSON_GetObjectItem(root, "errno");
     if (!cJSON_IsNumber(errno_item) || errno_item->valueint != 0) {
@@ -579,48 +634,60 @@ static OPERATE_RET get_baidu_list(const bdndk_token_t *t)
     }
 
     int n = cJSON_GetArraySize(list);
-    if (n < 0) n = 0;
-    if (n > (int)(sizeof(sg_list) / sizeof(sg_list[0]))) n = (int)(sizeof(sg_list) / sizeof(sg_list[0]));
+    if (n < 0)
+        n = 0;
+    if (n > (int)(sizeof(sg_list) / sizeof(sg_list[0])))
+        n = (int)(sizeof(sg_list) / sizeof(sg_list[0]));
     sg_list_count = 0;
     for (int i = 0; i < n; i++) {
         cJSON *it = cJSON_GetArrayItem(list, i);
-        if (!it) continue;
-        cJSON *fn = cJSON_GetObjectItem(it, "server_filename");
-        cJSON *p = cJSON_GetObjectItem(it, "path");
+        if (!it)
+            continue;
+        cJSON *fn    = cJSON_GetObjectItem(it, "server_filename");
+        cJSON *p     = cJSON_GetObjectItem(it, "path");
         cJSON *isdir = cJSON_GetObjectItem(it, "isdir");
-        cJSON *sz = cJSON_GetObjectItem(it, "size");
-        cJSON *fsid = cJSON_GetObjectItem(it, "fs_id");
-        if (!cJSON_IsString(fn) || !cJSON_IsString(p) || !cJSON_IsNumber(isdir)) continue;
+        cJSON *sz    = cJSON_GetObjectItem(it, "size");
+        cJSON *fsid  = cJSON_GetObjectItem(it, "fs_id");
+        if (!cJSON_IsString(fn) || !cJSON_IsString(p) || !cJSON_IsNumber(isdir))
+            continue;
         BDNDK_FILE_T *dst = &sg_list[sg_list_count++];
         memset(dst, 0, sizeof(*dst));
         strncpy(dst->name, fn->valuestring, sizeof(dst->name) - 1);
         strncpy(dst->path, p->valuestring, sizeof(dst->path) - 1);
         dst->is_dir = (isdir->valueint != 0) ? TRUE : FALSE;
-        if (cJSON_IsNumber(sz)) dst->size = (INT64_T)sz->valuedouble;
-        if (cJSON_IsNumber(fsid)) snprintf(dst->fsid, sizeof(dst->fsid), "%lld", (long long)fsid->valuedouble);
-        else if (cJSON_IsString(fsid)) strncpy(dst->fsid, fsid->valuestring, sizeof(dst->fsid) - 1);
+        if (cJSON_IsNumber(sz))
+            dst->size = (INT64_T)sz->valuedouble;
+        if (cJSON_IsNumber(fsid))
+            snprintf(dst->fsid, sizeof(dst->fsid), "%lld", (long long)fsid->valuedouble);
+        else if (cJSON_IsString(fsid))
+            strncpy(dst->fsid, fsid->valuestring, sizeof(dst->fsid) - 1);
+        if (sg_storage_ready && !dst->is_dir) {
+            dst->downloaded = file_exists_in_dir(sg_save_dir, dst->name);
+        }
     }
     cJSON_Delete(root);
     sg_need_refresh = TRUE;
     return OPRT_OK;
 }
 
-static OPERATE_RET parse_url(const char *url, char *scheme, size_t scheme_len, char *host, size_t host_len, uint16_t *port,
-                             char *path, size_t path_len)
+static OPERATE_RET parse_url(const char *url, char *scheme, size_t scheme_len, char *host, size_t host_len,
+                             uint16_t *port, char *path, size_t path_len)
 {
-    if (!url || !scheme || !host || !port || !path) return OPRT_INVALID_PARM;
+    if (!url || !scheme || !host || !port || !path)
+        return OPRT_INVALID_PARM;
     scheme[0] = 0;
-    host[0] = 0;
-    path[0] = 0;
-    *port = 0;
+    host[0]   = 0;
+    path[0]   = 0;
+    *port     = 0;
 
-    const char *p = strstr(url, "://");
+    const char *p          = strstr(url, "://");
     const char *host_begin = url;
     if (p) {
         size_t n = (size_t)(p - url);
-        if (n >= scheme_len) n = scheme_len - 1;
+        if (n >= scheme_len)
+            n = scheme_len - 1;
         memcpy(scheme, url, n);
-        scheme[n] = 0;
+        scheme[n]  = 0;
         host_begin = p + 3;
     } else {
         strncpy(scheme, "https", scheme_len - 1);
@@ -628,18 +695,20 @@ static OPERATE_RET parse_url(const char *url, char *scheme, size_t scheme_len, c
     }
 
     const char *path_begin = strchr(host_begin, '/');
-    if (!path_begin) path_begin = host_begin + strlen(host_begin);
+    if (!path_begin)
+        path_begin = host_begin + strlen(host_begin);
     size_t hostpart_len = (size_t)(path_begin - host_begin);
 
     char hostpart[256];
-    if (hostpart_len >= sizeof(hostpart)) hostpart_len = sizeof(hostpart) - 1;
+    if (hostpart_len >= sizeof(hostpart))
+        hostpart_len = sizeof(hostpart) - 1;
     memcpy(hostpart, host_begin, hostpart_len);
     hostpart[hostpart_len] = 0;
 
     char *colon = strchr(hostpart, ':');
     if (colon) {
         *colon = 0;
-        *port = (uint16_t)atoi(colon + 1);
+        *port  = (uint16_t)atoi(colon + 1);
     } else {
         *port = (strcmp(scheme, "https") == 0) ? 443 : 80;
     }
@@ -659,22 +728,26 @@ static OPERATE_RET parse_url(const char *url, char *scheme, size_t scheme_len, c
 
 static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, const char *save_path, INT64_T file_size)
 {
-    if (!url || !save_path) return OPRT_INVALID_PARM;
+    if (!url || !save_path)
+        return OPRT_INVALID_PARM;
 
-    char *cur_url = (char *)tal_malloc(4096);
-    char *path = (char *)tal_malloc(4096);
+    char *cur_url  = (char *)tal_malloc(4096);
+    char *path     = (char *)tal_malloc(4096);
     char *next_url = (char *)tal_malloc(4096);
     if (!cur_url || !path || !next_url) {
-        if (cur_url) tal_free(cur_url);
-        if (path) tal_free(path);
-        if (next_url) tal_free(next_url);
+        if (cur_url)
+            tal_free(cur_url);
+        if (path)
+            tal_free(path);
+        if (next_url)
+            tal_free(next_url);
         return OPRT_MALLOC_FAILED;
     }
     strncpy(cur_url, url, 4095);
     cur_url[4095] = 0;
 
     for (int redirects = 0; redirects < 5; redirects++) {
-        char scheme[8], host[256];
+        char     scheme[8], host[256];
         uint16_t port = 0;
         if (parse_url(cur_url, scheme, sizeof(scheme), host, sizeof(host), &port, path, 4096) != OPRT_OK) {
             tal_free(cur_url);
@@ -683,14 +756,15 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
             return OPRT_INVALID_PARM;
         }
 
-        uint8_t *cacert = NULL;
+        uint8_t *cacert     = NULL;
         uint16_t cacert_len = 0;
         if (strcmp(scheme, "https") == 0) {
             char url_for_cert[320];
             snprintf(url_for_cert, sizeof(url_for_cert), "https://%s", host);
             if (tuya_iotdns_query_domain_certs(url_for_cert, &cacert, &cacert_len) != OPRT_OK || !cacert ||
                 cacert_len == 0) {
-                if (cacert) tal_free(cacert);
+                if (cacert)
+                    tal_free(cacert);
                 tal_free(cur_url);
                 tal_free(path);
                 tal_free(next_url);
@@ -699,7 +773,7 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
         }
 
         TUYA_TRANSPORT_TYPE_E transport_type = (strcmp(scheme, "https") == 0) ? TRANSPORT_TYPE_TLS : TRANSPORT_TYPE_TCP;
-        NetworkContext_t network = tuya_transporter_create(transport_type, NULL);
+        NetworkContext_t      network        = tuya_transporter_create(transport_type, NULL);
         if (!network) {
             tal_free(cacert);
             tal_free(cur_url);
@@ -710,13 +784,13 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         if (transport_type == TRANSPORT_TYPE_TLS) {
             tuya_tls_config_t tls_config = {
-                .ca_cert = (char *)cacert,
+                .ca_cert      = (char *)cacert,
                 .ca_cert_size = cacert_len,
-                .hostname = host,
-                .port = port,
-                .timeout = BDNDK_HTTP_TIMEOUT_MS,
-                .mode = TUYA_TLS_SERVER_CERT_MODE,
-                .verify = true,
+                .hostname     = host,
+                .port         = port,
+                .timeout      = BDNDK_HTTP_TIMEOUT_MS,
+                .mode         = TUYA_TLS_SERVER_CERT_MODE,
+                .verify       = true,
             };
             if (tuya_transporter_ctrl(network, TUYA_TRANSPORTER_SET_TLS_CONFIG, &tls_config) != OPRT_OK) {
                 tal_free(cacert);
@@ -740,13 +814,13 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         TransportInterface_t transport = {
             .pNetworkContext = (NetworkContext_t *)&network,
-            .send = (TransportSend_t)NetworkTransportSend,
-            .recv = (TransportRecv_t)NetworkTransportRecv,
+            .send            = (TransportSend_t)NetworkTransportSend,
+            .recv            = (TransportRecv_t)NetworkTransportRecv,
         };
 
         HTTPRequestHeaders_t req_hdrs = {0};
-        req_hdrs.bufferLen = 4096;
-        req_hdrs.pBuffer = tal_malloc(req_hdrs.bufferLen);
+        req_hdrs.bufferLen            = 4096;
+        req_hdrs.pBuffer              = tal_malloc(req_hdrs.bufferLen);
         if (!req_hdrs.pBuffer) {
             tal_free(cacert);
             tuya_transporter_close(network);
@@ -756,14 +830,14 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
             tal_free(next_url);
             return OPRT_MALLOC_FAILED;
         }
-        const char *ua_use = (ua && ua[0]) ? ua : "pan.baidu.com";
-        int hdr_len = snprintf((char *)req_hdrs.pBuffer, req_hdrs.bufferLen,
-                               "GET %s HTTP/1.1\r\n"
-                               "Host: %s\r\n"
-                               "User-Agent: %s\r\n"
-                               "Connection: close\r\n"
-                               "\r\n",
-                               path, host, ua_use);
+        const char *ua_use  = (ua && ua[0]) ? ua : "pan.baidu.com";
+        int         hdr_len = snprintf((char *)req_hdrs.pBuffer, req_hdrs.bufferLen,
+                                       "GET %s HTTP/1.1\r\n"
+                                               "Host: %s\r\n"
+                                               "User-Agent: %s\r\n"
+                                               "Connection: close\r\n"
+                                               "\r\n",
+                                       path, host, ua_use);
         if (hdr_len <= 0 || (size_t)hdr_len >= req_hdrs.bufferLen) {
             tal_free(req_hdrs.pBuffer);
             tal_free(cacert);
@@ -777,7 +851,7 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
         req_hdrs.headersLen = (size_t)hdr_len;
 
         HTTPResponse_t resp = {0};
-        resp.pBuffer = tal_malloc(HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES + 1);
+        resp.pBuffer        = tal_malloc(HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES + 1);
         if (!resp.pBuffer) {
             tal_free(req_hdrs.pBuffer);
             tal_free(cacert);
@@ -788,7 +862,7 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
             tal_free(next_url);
             return OPRT_MALLOC_FAILED;
         }
-        resp.bufferLen = HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES;
+        resp.bufferLen  = HTTP_MAX_RESPONSE_HEADERS_SIZE_BYTES;
         HTTPStatus_t hs = HTTPClient_Send(&transport, &req_hdrs, NULL, 0, &resp,
                                           HTTP_SEND_DISABLE_CONTENT_LENGTH_FLAG | HTTP_SEND_DISABLE_RECV_BODY_FLAG);
         tal_free(req_hdrs.pBuffer);
@@ -807,11 +881,12 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         if (resp.statusCode == 301 || resp.statusCode == 302 || resp.statusCode == 303 || resp.statusCode == 307 ||
             resp.statusCode == 308) {
-            const char *loc = NULL;
-            size_t loc_len = 0;
+            const char *loc     = NULL;
+            size_t      loc_len = 0;
             if (HTTPClient_ReadHeader(&resp, "Location", strlen("Location"), &loc, &loc_len) != HTTPSuccess || !loc ||
                 loc_len == 0) {
-                if (resp.pBuffer) tal_free(resp.pBuffer);
+                if (resp.pBuffer)
+                    tal_free(resp.pBuffer);
                 tuya_transporter_close(network);
                 tuya_transporter_destroy(network);
                 tal_free(cur_url);
@@ -821,7 +896,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
             }
 
             size_t n = loc_len;
-            if (n >= 4096) n = 4095;
+            if (n >= 4096)
+                n = 4095;
             memcpy(next_url, loc, n);
             next_url[n] = 0;
 
@@ -836,7 +912,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
                 cur_url[4095] = 0;
             }
 
-            if (resp.pBuffer) tal_free(resp.pBuffer);
+            if (resp.pBuffer)
+                tal_free(resp.pBuffer);
             tuya_transporter_close(network);
             tuya_transporter_destroy(network);
             continue;
@@ -844,7 +921,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         if (resp.statusCode != 200 && resp.statusCode != 206) {
             PR_ERR("Download http status: %d", (int)resp.statusCode);
-            if (resp.pBuffer) tal_free(resp.pBuffer);
+            if (resp.pBuffer)
+                tal_free(resp.pBuffer);
             tuya_transporter_close(network);
             tuya_transporter_destroy(network);
             tal_free(cur_url);
@@ -853,13 +931,14 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
             return OPRT_COM_ERROR;
         }
 
-        const char *ct = NULL;
-        size_t ct_len = 0;
+        const char *ct     = NULL;
+        size_t      ct_len = 0;
         if (HTTPClient_ReadHeader(&resp, "Content-Type", strlen("Content-Type"), &ct, &ct_len) == HTTPSuccess && ct &&
             ct_len > 0) {
-            char ct_buf[64];
+            char   ct_buf[64];
             size_t nn = ct_len;
-            if (nn >= sizeof(ct_buf)) nn = sizeof(ct_buf) - 1;
+            if (nn >= sizeof(ct_buf))
+                nn = sizeof(ct_buf) - 1;
             memcpy(ct_buf, ct, nn);
             ct_buf[nn] = 0;
             if (strstr(ct_buf, "application/json")) {
@@ -876,7 +955,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
                         cJSON_Delete(jr);
                     }
                 }
-                if (resp.pBuffer) tal_free(resp.pBuffer);
+                if (resp.pBuffer)
+                    tal_free(resp.pBuffer);
                 tuya_transporter_close(network);
                 tuya_transporter_destroy(network);
                 tal_free(cur_url);
@@ -888,7 +968,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         TUYA_FILE f = tkl_fopen(save_path, "w");
         if (!f) {
-            if (resp.pBuffer) tal_free(resp.pBuffer);
+            if (resp.pBuffer)
+                tal_free(resp.pBuffer);
             tuya_transporter_close(network);
             tuya_transporter_destroy(network);
             tal_free(cur_url);
@@ -900,7 +981,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
         uint8_t *buf = tal_malloc(8 * 1024);
         if (!buf) {
             tkl_fclose(f);
-            if (resp.pBuffer) tal_free(resp.pBuffer);
+            if (resp.pBuffer)
+                tal_free(resp.pBuffer);
             tuya_transporter_close(network);
             tuya_transporter_destroy(network);
             tal_free(cur_url);
@@ -912,13 +994,16 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
         INT64_T written = 0;
         for (;;) {
             int32_t r = HTTPClient_Recv(&transport, &resp, buf, 8 * 1024);
-            if (r <= 0) break;
+            if (r <= 0)
+                break;
             tkl_fwrite(buf, r, f);
             written += r;
             if (file_size > 0) {
                 int pct = (int)((written * 100) / file_size);
-                if (pct < 0) pct = 0;
-                if (pct > 100) pct = 100;
+                if (pct < 0)
+                    pct = 0;
+                if (pct > 100)
+                    pct = 100;
                 if (pct != sg_progress_percent) {
                     sg_progress_percent = pct;
                 }
@@ -927,7 +1012,8 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
         tal_free(buf);
         tkl_fclose(f);
-        if (resp.pBuffer) tal_free(resp.pBuffer);
+        if (resp.pBuffer)
+            tal_free(resp.pBuffer);
         tuya_transporter_close(network);
         tuya_transporter_destroy(network);
 
@@ -956,28 +1042,32 @@ static OPERATE_RET http_get_stream_to_file(const char *url, const char *ua, cons
 
 static OPERATE_RET download_by_fsid(const bdndk_token_t *t, const BDNDK_FILE_T *fi, const char *save_dir)
 {
-    if (!t || !fi || !save_dir) return OPRT_INVALID_PARM;
+    if (!t || !fi || !save_dir)
+        return OPRT_INVALID_PARM;
 
-    size_t meta_cap = 1400;
-    char *path_meta = (char *)tal_malloc(meta_cap);
-    if (!path_meta) return OPRT_MALLOC_FAILED;
-    snprintf(path_meta, meta_cap,
-             "/rest/2.0/xpan/multimedia?method=filemetas&access_token=%s&fsids=[%s]&dlink=1", t->access_token, fi->fsid);
+    size_t meta_cap  = 1400;
+    char  *path_meta = (char *)tal_malloc(meta_cap);
+    if (!path_meta)
+        return OPRT_MALLOC_FAILED;
+    snprintf(path_meta, meta_cap, "/rest/2.0/xpan/multimedia?method=filemetas&access_token=%s&fsids=[%s]&dlink=1",
+             t->access_token, fi->fsid);
 
-    char *body = NULL;
-    OPERATE_RET rt = https_get_json("pan.baidu.com", path_meta, "pan.baidu.com", &body);
+    char       *body = NULL;
+    OPERATE_RET rt   = https_get_json("pan.baidu.com", path_meta, "pan.baidu.com", &body);
     tal_free(path_meta);
-    if (rt != OPRT_OK) return rt;
+    if (rt != OPRT_OK)
+        return rt;
     cJSON *root = cJSON_Parse(body);
     tal_free(body);
-    if (!root) return OPRT_CJSON_PARSE_ERR;
+    if (!root)
+        return OPRT_CJSON_PARSE_ERR;
 
     cJSON *errno_item = cJSON_GetObjectItem(root, "errno");
     if (!cJSON_IsNumber(errno_item) || errno_item->valueint != 0) {
         cJSON_Delete(root);
         return OPRT_COM_ERROR;
     }
-    cJSON *list = cJSON_GetObjectItem(root, "list");
+    cJSON *list  = cJSON_GetObjectItem(root, "list");
     cJSON *item0 = (cJSON_IsArray(list) && cJSON_GetArraySize(list) > 0) ? cJSON_GetArrayItem(list, 0) : NULL;
     cJSON *dlink = item0 ? cJSON_GetObjectItem(item0, "dlink") : NULL;
     if (!cJSON_IsString(dlink)) {
@@ -985,11 +1075,13 @@ static OPERATE_RET download_by_fsid(const bdndk_token_t *t, const BDNDK_FILE_T *
         return OPRT_COM_ERROR;
     }
 
-    char *dlink_clean = (char *)tal_malloc(4096);
+    char *dlink_clean  = (char *)tal_malloc(4096);
     char *download_url = (char *)tal_malloc(4096);
     if (!dlink_clean || !download_url) {
-        if (dlink_clean) tal_free(dlink_clean);
-        if (download_url) tal_free(download_url);
+        if (dlink_clean)
+            tal_free(dlink_clean);
+        if (download_url)
+            tal_free(download_url);
         cJSON_Delete(root);
         return OPRT_MALLOC_FAILED;
     }
@@ -1012,7 +1104,7 @@ static OPERATE_RET download_by_fsid(const bdndk_token_t *t, const BDNDK_FILE_T *
     char save_path[512];
     snprintf(save_path, sizeof(save_path), "%s/%s", save_dir, fi->name);
     sg_progress_percent = 0;
-    rt = http_get_stream_to_file(download_url, "pan.baidu.com", save_path, fi->size);
+    rt                  = http_get_stream_to_file(download_url, "pan.baidu.com", save_path, fi->size);
     tal_free(dlink_clean);
     tal_free(download_url);
     return rt;
@@ -1034,12 +1126,12 @@ static OPERATE_RET ensure_net_up(void)
 static void worker_main(void *arg)
 {
     (void)arg;
-    sg_need_refresh = TRUE;
-    sg_work = BDNDK_WORK_IDLE;
-    sg_view = BDNDK_VIEW_AUTH;
-    sg_progress_percent = -1;
+    sg_need_refresh           = TRUE;
+    sg_work                   = BDNDK_WORK_IDLE;
+    sg_view                   = BDNDK_VIEW_AUTH;
+    sg_progress_percent       = -1;
     sg_pending_download_index = -1;
-    sg_selected_index = -1;
+    sg_selected_index         = -1;
     memset(&sg_auth, 0, sizeof(sg_auth));
     memset(&sg_token, 0, sizeof(sg_token));
     sg_list_count = 0;
@@ -1072,8 +1164,8 @@ static void worker_main(void *arg)
     }
 
     if (!token_is_valid(&t)) {
-        sg_work = BDNDK_WORK_AUTHING;
-        sg_view = BDNDK_VIEW_AUTH;
+        sg_work         = BDNDK_WORK_AUTHING;
+        sg_view         = BDNDK_VIEW_AUTH;
         sg_need_refresh = TRUE;
 
         if (BDNDK_APP_KEY[0] == 0 || BDNDK_APP_SECRET[0] == 0) {
@@ -1101,7 +1193,7 @@ static void worker_main(void *arg)
         set_msg("Scan QR / open URL");
 
         bdndk_token_t new_t;
-        OPERATE_RET art = poll_access_token(&auth, &new_t);
+        OPERATE_RET   art = poll_access_token(&auth, &new_t);
         if (art != OPRT_OK) {
             sg_work = BDNDK_WORK_ERR;
             set_msg("Authorize timeout");
@@ -1119,8 +1211,8 @@ static void worker_main(void *arg)
 
     memcpy(&sg_token, &t, sizeof(t));
 
-    sg_work = BDNDK_WORK_LISTING;
-    sg_view = BDNDK_VIEW_LIST;
+    sg_work         = BDNDK_WORK_LISTING;
+    sg_view         = BDNDK_VIEW_LIST;
     sg_need_refresh = TRUE;
     set_msg("Loading list...");
     if (get_baidu_list(&t) != OPRT_OK) {
@@ -1135,13 +1227,11 @@ static void worker_main(void *arg)
         int idx = sg_pending_download_index;
         if (idx >= 0 && idx < sg_list_count) {
             sg_pending_download_index = -1;
-            sg_work = BDNDK_WORK_DOWNLOADING;
-            sg_view = BDNDK_VIEW_MSG;
-            sg_progress_percent = 0;
-            set_msg("Downloading...");
+            sg_work                   = BDNDK_WORK_DOWNLOADING;
+            sg_progress_percent       = 0;
 
             if (!sg_storage_ready) {
-                sg_work = BDNDK_WORK_ERR;
+                sg_work             = BDNDK_WORK_ERR;
                 sg_progress_percent = -1;
                 set_msg("SD not mounted");
                 continue;
@@ -1154,12 +1244,18 @@ static void worker_main(void *arg)
 
             OPERATE_RET drt = download_by_fsid(&t, &sg_list[idx], sg_save_dir);
             if (drt == OPRT_OK) {
-                sg_work = BDNDK_WORK_OK;
+                sg_work                 = BDNDK_WORK_OK;
+                sg_list[idx].downloaded = TRUE;
+                if (sg_selected_index == idx) {
+                    sg_detail.downloaded = TRUE;
+                }
+                sg_view = BDNDK_VIEW_MSG;
                 set_msg("Download success");
             } else {
                 sg_work = BDNDK_WORK_ERR;
                 char em[64];
                 snprintf(em, sizeof(em), "Download failed (%d)", drt);
+                sg_view = BDNDK_VIEW_MSG;
                 set_msg(em);
             }
         }
@@ -1170,14 +1266,15 @@ static void worker_main(void *arg)
 
 OPERATE_RET bdndk_start(void)
 {
-    if (sg_running) return OPRT_OK;
-    sg_running = TRUE;
-    sg_need_refresh = TRUE;
-    sg_view = BDNDK_VIEW_AUTH;
-    sg_work = BDNDK_WORK_IDLE;
+    if (sg_running)
+        return OPRT_OK;
+    sg_running          = TRUE;
+    sg_need_refresh     = TRUE;
+    sg_view             = BDNDK_VIEW_AUTH;
+    sg_work             = BDNDK_WORK_IDLE;
     sg_progress_percent = -1;
-    sg_last_msg[0] = 0;
-    THREAD_CFG_T cfg = {.priority = THREAD_PRIO_3, .stackDepth = 24 * 1024, .thrdname = "bdndk"};
+    sg_last_msg[0]      = 0;
+    THREAD_CFG_T cfg    = {.priority = THREAD_PRIO_3, .stackDepth = 24 * 1024, .thrdname = "bdndk"};
     if (tal_thread_create_and_start(&sg_worker_thrd, NULL, NULL, worker_main, NULL, &cfg) != OPRT_OK) {
         sg_running = FALSE;
         return OPRT_COM_ERROR;
