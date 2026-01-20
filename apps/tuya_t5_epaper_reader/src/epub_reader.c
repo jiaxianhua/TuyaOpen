@@ -51,6 +51,9 @@ typedef struct {
     char      base_dir[EPUB_NAME_MAX];
 } html_filter_t;
 
+static int extract_attr_value(const char *tag, const char *attr, char *out, size_t out_len);
+static int resolve_img_src(const char *base_dir, const char *src, char *out_rel, size_t out_len);
+
 static uint16_t le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
